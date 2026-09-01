@@ -28,6 +28,11 @@ demo_data.libero_v21:
   dataset_type: vla
   sample_ratio: 1.0
   use_quantile: true
+libero_wo_ecot_pt:
+  dataset_path: /opt/data/private/lq/datasets/HuggingFaceVLA/libero
+  dataset_type: vla
+  sample_ratio: 1.0
+  use_quantile: true
 demo_data.robocasa_gr1_tabletop_tasks.gr1_unified.PosttrainPnPNovelFromCuttingboardToPotSplitA:
   dataset_path: demo_data/robocasa_gr1_tabletop_tasks/gr1_unified.PosttrainPnPNovelFromCuttingboardToPotSplitA
   dataset_type: vla

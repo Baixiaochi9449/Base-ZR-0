@@ -15,6 +15,8 @@ from accelerate.utils import set_seed
 from transformers import get_cosine_with_min_lr_schedule_with_warmup_lr_rate, get_constant_schedule_with_warmup
 from torch.utils.tensorboard import SummaryWriter
 from deepspeed.runtime.engine import DeepSpeedEngine
+from utils.training_numerics import assert_all_finite
+from utils.wandb_training_logger import WandbTrainingLogger
 
 def parse_option():
     parser = argparse.ArgumentParser()
@@ -34,6 +36,10 @@ def parse_option():
     parser.add_argument('--epochs', type = int, default = 16)
     parser.add_argument('--save_ckpt_interval', type = int, default = 1)
     parser.add_argument('--save_step_interval', type = int, default = 20000)
+    parser.add_argument(
+        '--max_train_steps', type = int, default = None,
+        help = 'Optional early-stop step for smoke validation; scheduler horizon remains unchanged.'
+    )
     # parser.add_argument('--vlm_peak_learning_rate', type = float, default = 3e-5, help = "peak learning rate of the VLM")
     # parser.add_argument('--action_expert_peak_learning_rate', type = float, default = 3e-5, help = "peak learning rate of the action expert")
     parser.add_argument('--peak_learning_rate', type = float, default = 1e-5, help = "peak learning rate")
@@ -41,6 +47,13 @@ def parse_option():
                         help = "the minimal learning rate in the end of training (percent of peak LR)")
     parser.add_argument('--tensorboard_log_dir', type = str, default = "./outputs/train_logs/ZR-0")
     parser.add_argument('--output_ckpt_dir', type = str, default = "./outputs/ckpts/ZR-0")
+    parser.add_argument('--wandb_project', type = str)
+    parser.add_argument('--wandb_run_name', type = str)
+    parser.add_argument('--wandb_run_id', type = str)
+    parser.add_argument('--wandb_resume', choices = ["never", "must"], default = "never")
+    parser.add_argument('--wandb_dir', type = str, default = "./outputs/wandb")
+    parser.add_argument('--wandb_group', type = str)
+    parser.add_argument('--wandb_tags', type = str, nargs = '*')
 
     # args for model training
     parser.add_argument('--tune_vlm', action = 'store_true', help = "Whether to fine-tune the VLM")
@@ -76,6 +89,8 @@ def parse_option():
     parser.add_argument('--max_pad_state_and_action_length', type = int, default = 64, help = "dim size of the max padded state and action")
 
     opt = parser.parse_args()
+    if opt.max_train_steps is not None and opt.max_train_steps < 1:
+        parser.error("--max_train_steps must be at least 1")
 
     return opt
 
@@ -274,6 +289,25 @@ def train(opt):
     num_total_batches = math.ceil(opt.epochs * math.ceil(len(concat_dataset) / total_batch_size))
     warmup_steps = min(20000 * accelerator.num_processes, int(num_total_batches * 0.08) * accelerator.num_processes)
 
+    wandb_logger = WandbTrainingLogger(
+        accelerator,
+        project=opt.wandb_project,
+        run_name=opt.wandb_run_name,
+        run_id=opt.wandb_run_id,
+        resume=opt.wandb_resume,
+        log_dir=opt.wandb_dir,
+        group=opt.wandb_group,
+        tags=opt.wandb_tags,
+        config={
+            **vars(opt),
+            "global_batch_size": total_batch_size,
+            "num_processes": accelerator.num_processes,
+            "num_total_steps": num_total_batches,
+            "warmup_steps": warmup_steps // accelerator.num_processes,
+        },
+    )
+    accelerator.wait_for_everyone()
+
     if opt.lr_scheduler == "cosine":
         # learning rate scheduler (linear warm up and cosine decay)
         lr_scheduler = get_cosine_with_min_lr_schedule_with_warmup_lr_rate(
@@ -324,6 +358,7 @@ def train(opt):
 
     accelerator.wait_for_everyone()
     st = time.time()
+    reached_max_train_steps = False
     for epoch in range(opt.epochs):
         # set the epoch into each dataset
         for ds in concat_dataset.datasets:
@@ -347,6 +382,8 @@ def train(opt):
                 training_progress = global_completed_steps/num_total_batches
                 outputs = model(batch, training_progress, opt.loss_type, opt.vlm_loss_weight, opt.action_expert_loss_weight)
                 loss = outputs.loss
+                next_global_step = global_completed_steps + 1
+                assert_all_finite(accelerator, loss, "loss", next_global_step)
 
                 # when deepspeed is enabled, `accelerator.backward(loss)` will perform optimizer.step(), optimizer.zero_grad(), and grad accumulation automatically. 
                 # see `if self.is_gradient_accumulation_boundary():` line in path-to-env/site-packages/deepspeed/runtime/engine.py
@@ -354,6 +391,15 @@ def train(opt):
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
+
+                global_grad_norm = model.get_global_grad_norm()
+                if global_grad_norm is not None:
+                    assert_all_finite(
+                        accelerator,
+                        global_grad_norm,
+                        "global gradient norm",
+                        next_global_step,
+                    )
 
             # 'accelerator.sync_gradients' checks if the accelerator has performed an optimization step on the `total_batch_size` data samples, 
             # however, sync_gradients is not guaranteed to be consistent in all ranks
@@ -372,10 +418,18 @@ def train(opt):
             # 4. unpack back to python int
             global_completed_steps = step_tensor.item()
 
+            reached_max_train_steps = (
+                opt.max_train_steps is not None
+                and global_completed_steps >= opt.max_train_steps
+            )
+
             # check whether to save model
             do_save = (
                 global_completed_steps > 0
-                and global_completed_steps % opt.save_step_interval == 0
+                and (
+                    global_completed_steps % opt.save_step_interval == 0
+                    or reached_max_train_steps
+                )
             )
 
             if do_save:
@@ -395,8 +449,9 @@ def train(opt):
                 # accelerator.print("loss:", loss_detach, "vlm loss:", vlm_loss_detach, "action expert loss:", action_expert_loss_detach)
 
                 if accelerator.is_main_process:
-                    # writer.add_scalar('learning-rate', lr_scheduler.get_last_lr()[0], global_completed_steps)
-                    writer.add_scalar('grad-norm', model.get_global_grad_norm(), global_completed_steps)
+                    writer.add_scalar('learning-rate', lr_scheduler.get_last_lr()[0], global_completed_steps)
+                    if global_grad_norm is not None:
+                        writer.add_scalar('grad-norm', global_grad_norm, global_completed_steps)
                     writer.add_scalar('training progress', training_progress, global_completed_steps)
 
                 writer.add_scalar('train-loss/gpu-{}'.format(accelerator.process_index), loss_detach, global_completed_steps)
@@ -404,6 +459,35 @@ def train(opt):
                     writer.add_scalar('train-vlm-loss/gpu-{}'.format(accelerator.process_index), vlm_loss_detach, global_completed_steps)
                 if "action_expert_loss" in outputs:
                     writer.add_scalar('train-action-expert-loss/gpu-{}'.format(accelerator.process_index), action_expert_loss_detach, global_completed_steps)
+
+                mean_metrics = {"train/loss": loss_detach}
+                if "vlm_loss" in outputs:
+                    mean_metrics["train/vlm_loss"] = vlm_loss_detach
+                if "action_expert_loss" in outputs:
+                    mean_metrics["train/action_expert_loss"] = action_expert_loss_detach
+                scalar_metrics = {
+                    "train/learning_rate": lr_scheduler.get_last_lr()[0],
+                    "train/progress": global_completed_steps / num_total_batches,
+                    "train/epoch": epoch,
+                }
+                if global_grad_norm is not None:
+                    scalar_metrics["train/grad_norm"] = float(global_grad_norm)
+
+                wandb_logger.log(
+                    step=global_completed_steps,
+                    mean_metrics=mean_metrics,
+                    scalar_metrics=scalar_metrics,
+                )
+
+            if reached_max_train_steps:
+                break
+
+        if reached_max_train_steps:
+            accelerator.wait_for_everyone()
+            accelerator.print(
+                f"Reached max training steps: {opt.max_train_steps}"
+            )
+            break
         
         accelerator.wait_for_everyone()
 
@@ -422,6 +506,9 @@ def train(opt):
             if opt.save_optimizer_and_lr_states:
                 checkpoint_model_optimizer_scheduler(model, opt.output_ckpt_dir, global_completed_steps, lr_scheduler, accelerator)
             accelerator.wait_for_everyone()
+
+    writer.close()
+    wandb_logger.finish(exit_code=0)
 
 if __name__ == "__main__":
     opt = parse_option()

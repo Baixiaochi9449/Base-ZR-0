@@ -8,6 +8,13 @@ from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor, Qwen
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.utils import is_flash_attn_2_available
 
+
+def _get_qwen_final_text_norm(model: nn.Module) -> nn.Module:
+    if hasattr(model, "get_base_model"):
+        model = model.get_base_model()
+    return model.model.language_model.norm
+
+
 class QwenVLBackbone(nn.Module):
     def __init__(
         self, model_name: str, tune_vlm: bool, lora_args: dict
@@ -160,10 +167,9 @@ class QwenVLBackbone(nn.Module):
         model_outputs = self.model(**vl_inputs, return_dict=True, 
                                    output_hidden_states=True, use_cache=use_cache)
 
-        # return the embeddings of all tokens in the middle or the last layer (bs, seq_len, hidden_size)
-        # layer_idx = self.model.config.text_config.num_hidden_layers//2
-        layer_idx = -1
-        embeddings = model_outputs["hidden_states"][layer_idx] # e.g., (4, 4096, 2048)
+        # Transformers records Qwen3-VL decoder outputs before its final RMSNorm.
+        raw_last_hidden_state = model_outputs["hidden_states"][-1]
+        embeddings = _get_qwen_final_text_norm(self.model)(raw_last_hidden_state)
 
         # let the action expert only attend to the input (i.e., "image+text prompt" part) of the VLM,
         # including the generation prompt '<|im_start|>assistant\n'. Thus, during inference, we should set `add_generation_prompt` to True.

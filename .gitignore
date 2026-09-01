@@ -1,0 +1,7 @@
+/fast/
+/result/
+/LIBERO/
+/temp/
+/outputs/
+__pycache__/
+*.py[cod]
