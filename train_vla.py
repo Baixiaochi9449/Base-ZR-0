@@ -1,5 +1,4 @@
 import os
-import argparse
 import math
 import time
 import json
@@ -14,119 +13,39 @@ from torch.optim import AdamW
 from accelerate.utils import set_seed
 from transformers import get_cosine_with_min_lr_schedule_with_warmup_lr_rate, get_constant_schedule_with_warmup
 from torch.utils.tensorboard import SummaryWriter
-from deepspeed.runtime.engine import DeepSpeedEngine
 from utils.training_numerics import assert_all_finite
 from utils.wandb_training_logger import WandbTrainingLogger
+from utils.cli_options import parse_train_options
+from utils.training_checkpoint import (
+    checkpoint_model_optimizer_scheduler,
+    resume_model_optimizer_scheduler,
+)
 
-def parse_option():
-    parser = argparse.ArgumentParser()
+def parse_option(args=None):
+    return parse_train_options(args)
 
-    # args for the path of VLM, action expert, and FAST tokenizer
-    parser.add_argument('--vlm_name_or_path', type = str, help="file path of pretrained VLM")
-    parser.add_argument('--action_expert_name_or_path', type = str, 
-                        help="path of the pretrained action expert. \
-                            Unset means that we will use a randomly initialized action expert.")
-    parser.add_argument('--FAST_tokenizer_path', type = str,
-                        help="file path of pretrained FAST action tokenizer")
-    
-    # global args
-    parser.add_argument('--per_device_train_batch_size', type = int, default = 8,
-                        help = 'batch size per gpu device.')
-    parser.add_argument('--seed', type = int, default = 42)
-    parser.add_argument('--epochs', type = int, default = 16)
-    parser.add_argument('--save_ckpt_interval', type = int, default = 1)
-    parser.add_argument('--save_step_interval', type = int, default = 20000)
-    parser.add_argument(
-        '--max_train_steps', type = int, default = None,
-        help = 'Optional early-stop step for smoke validation; scheduler horizon remains unchanged.'
+
+def should_skip_resumed_batch(
+    *, epoch: int, batch_idx: int, resume_epoch: int, resume_batch_idx: int
+) -> bool:
+    return epoch == resume_epoch and batch_idx < resume_batch_idx
+
+
+def synchronize_global_step(global_completed_steps: int, accelerator) -> int:
+    if accelerator.num_processes == 1:
+        return global_completed_steps
+    if not dist.is_available() or not dist.is_initialized():
+        raise RuntimeError(
+            "multi-process global-step synchronization requires an initialized "
+            "torch.distributed process group"
+        )
+    step_tensor = torch.tensor(
+        global_completed_steps,
+        device=accelerator.device,
+        dtype=torch.long,
     )
-    # parser.add_argument('--vlm_peak_learning_rate', type = float, default = 3e-5, help = "peak learning rate of the VLM")
-    # parser.add_argument('--action_expert_peak_learning_rate', type = float, default = 3e-5, help = "peak learning rate of the action expert")
-    parser.add_argument('--peak_learning_rate', type = float, default = 1e-5, help = "peak learning rate")
-    parser.add_argument('--min_lr_rate', type = float, default = 0.1,
-                        help = "the minimal learning rate in the end of training (percent of peak LR)")
-    parser.add_argument('--tensorboard_log_dir', type = str, default = "./outputs/train_logs/ZR-0")
-    parser.add_argument('--output_ckpt_dir', type = str, default = "./outputs/ckpts/ZR-0")
-    parser.add_argument('--wandb_project', type = str)
-    parser.add_argument('--wandb_run_name', type = str)
-    parser.add_argument('--wandb_run_id', type = str)
-    parser.add_argument('--wandb_resume', choices = ["never", "must"], default = "never")
-    parser.add_argument('--wandb_dir', type = str, default = "./outputs/wandb")
-    parser.add_argument('--wandb_group', type = str)
-    parser.add_argument('--wandb_tags', type = str, nargs = '*')
-
-    # args for model training
-    parser.add_argument('--tune_vlm', action = 'store_true', help = "Whether to fine-tune the VLM")
-    parser.add_argument('--tune_action_expert', action = 'store_true', help = "Whether to fine-tune the projectors in the action expert")
-    parser.add_argument('--detach_vlm_outputs_for_action_expert', action = 'store_true', 
-                        help='whether to stop gradient from the action expert to VLM')
-    parser.add_argument('--loss_type', type = str, default = "vlm_and_action",
-                        help = "support [vlm_and_action, vlm, action]")
-    parser.add_argument('--vlm_loss_weight', type = float, default = 1.0,
-                        help = "when setting loss type to vlm_and_action, we can control the weight of the VLM's loss")
-    parser.add_argument('--action_expert_loss_weight', type = float, default = 1.0,
-                        help = "when setting loss type to vlm_and_action, we can control the weight of the action expert's loss")
-    parser.add_argument('--lr_scheduler', type = str, default = "cosine",
-                        help = "the type of the LR Scheduler. Avaliable: [cosine, constant]")
-    parser.add_argument('--resume_training', action = 'store_true', help = 'whether to resume training')
-    parser.add_argument('--save_optimizer_and_lr_states', action = 'store_true', help = "Whether to save states of the optimizer and the LR scheduler")
-
-    # args for LoRA tuning
-    parser.add_argument('--use_lora', action = 'store_true', help = "Whether to use LoRA to fine-tune the model")
-    parser.add_argument('--target_modules', type = str, default = "gate_proj, up_proj, down_proj", help = "The names of the modules to apply the adapter to")
-    parser.add_argument('--r', type = int, default = 16, help = "LoRA attention dimension (the `rank`)")
-    parser.add_argument('--lora_alpha', type = int, default = 32,
-                        help = "The alpha parameter for LoRA scaling. Typically setting to the double of `r`.")
-    parser.add_argument('--lora_dropout', type = float, default = 0.0, help = "The dropout probability for LoRA layers")
-    
-    # args for dataset
-    parser.add_argument(
-        '--dataset_entries', type=str, nargs='+',
-        help='List of training dataset entries, e.g., "bridge_orig_lerobot fractal20220817_data_lerobot libero_v21"'
-    )
-    parser.add_argument('--window_size', type = int, default = 1, help = "size of the sliding window for historical image observations")
-    parser.add_argument('--action_horizon', type = int, default = 32, help = "size of the action chunk")
-    parser.add_argument('--max_pad_state_and_action_length', type = int, default = 64, help = "dim size of the max padded state and action")
-
-    opt = parser.parse_args()
-    if opt.max_train_steps is not None and opt.max_train_steps < 1:
-        parser.error("--max_train_steps must be at least 1")
-
-    return opt
-
-def checkpoint_model_optimizer_scheduler(model: DeepSpeedEngine, output_ckpt_dir, global_completed_steps, lr_scheduler, accelerator):
-    """
-    Utility function for checkpointing model + optimizer + LR scheduler states
-    The main purpose for this is to be able to resume training from that instant again
-    """
-    checkpoint_state_dict = {
-        "last_global_step": global_completed_steps,
-    }
-    # accelerator.wait_for_everyone()
-
-    accelerator.print("==> saving model and optimizer <==")
-    model.save_checkpoint(output_ckpt_dir, tag = "latest-model-optimizer-lr", client_state = checkpoint_state_dict, save_latest = False)
-
-    accelerator.print("==> saving lr scheduler <==")
-    accelerator.save(lr_scheduler.state_dict(), os.path.join(output_ckpt_dir, "latest-model-optimizer-lr", "scheduler.pt"))
-    # accelerator.wait_for_everyone()
-
-    # save VLM + action expert's parameters, configs, and processors as usual
-    if accelerator.is_main_process:
-        unwrapped_model = accelerator.unwrap_model(model)
-        unwrapped_model.save_pretrained(os.path.join(output_ckpt_dir, "latest-model-optimizer-lr"))
-
-    return
-
-def resume_model_and_optimizer(model: DeepSpeedEngine, old_output_ckpt_dir):
-    """
-    Utility function for resuming model training (resume model and optimizer dictionaries)
-    """
-    _, checkpoint_state_dict = model.load_checkpoint(old_output_ckpt_dir, tag = "latest-model-optimizer-lr")
-    
-    last_global_step = checkpoint_state_dict["last_global_step"]
-
-    return last_global_step
+    dist.broadcast(step_tensor, src=0)
+    return int(step_tensor.item())
 
 def get_absolute_path(path):
     if os.path.isabs(path):
@@ -195,7 +114,11 @@ def train(opt):
     if opt.action_expert_name_or_path:
         accelerator.print(f"using a pre-trained action expert from {opt.action_expert_name_or_path}, thus we will load its configurations.")
         # load action expert's configurations
-        action_expert_config_json = json.load(open(os.path.join(opt.action_expert_name_or_path, "action_expert_config.json")))
+        with open(
+            os.path.join(opt.action_expert_name_or_path, "action_expert_config.json"),
+            encoding="utf-8",
+        ) as config_file:
+            action_expert_config_json = json.load(config_file)
         # overwrite some args
         action_expert_config_json["action_dim"] = opt.max_pad_state_and_action_length
         action_expert_config_json["state_dim"] = opt.max_pad_state_and_action_length
@@ -229,7 +152,10 @@ def train(opt):
         tune_vlm = opt.tune_vlm,
         tune_action_expert = opt.tune_action_expert,
         detach_vlm_outputs_for_action_expert = opt.detach_vlm_outputs_for_action_expert,
-        lora_args = lora_args
+        lora_args = lora_args,
+        use_difference_query = opt.use_difference_query,
+        num_difference_queries = opt.num_difference_queries,
+        vlm_attention_backend = opt.vlm_attention_backend,
     )
     accelerator.wait_for_everyone()
 
@@ -335,15 +261,14 @@ def train(opt):
     model.train()
     
     if opt.resume_training:
-        from deepspeed.runtime.fp16.loss_scaler import LossScaler
-        from deepspeed.runtime.zero.config import ZeroStageEnum
-        from deepspeed.utils.tensor_fragment import fragment_address
-        torch.serialization.add_safe_globals([LossScaler, ZeroStageEnum, fragment_address])
         assert opt.vlm_name_or_path == opt.action_expert_name_or_path
 
         old_output_ckpt_dir = os.path.dirname(opt.vlm_name_or_path)
-        # resume model and optimizer states
-        global_completed_steps = resume_model_and_optimizer(model, old_output_ckpt_dir)
+        global_completed_steps = resume_model_optimizer_scheduler(
+            model,
+            old_output_ckpt_dir,
+            lr_scheduler,
+        )
         
         resume_epoch = global_completed_steps * accelerator.gradient_accumulation_steps // len(dataloader)
         resume_batch_idx = global_completed_steps * accelerator.gradient_accumulation_steps % len(dataloader)
@@ -352,8 +277,6 @@ def train(opt):
         accelerator.print("resume batch index:", resume_batch_idx)
         accelerator.print("resume training from {} steps.".format(global_completed_steps))
 
-        # resume lr scheduler
-        lr_scheduler.load_state_dict(torch.load(os.path.join(old_output_ckpt_dir, "latest-model-optimizer-lr", "scheduler.pt")))
         accelerator.print("resumed lr scheduler state dict:", lr_scheduler.state_dict())
 
     accelerator.wait_for_everyone()
@@ -372,7 +295,12 @@ def train(opt):
         accelerator.print(f"{epoch=}")
 
         for batch_idx, batch in enumerate(dataloader):
-            if opt.resume_training and resume_batch_idx > batch_idx:
+            if opt.resume_training and should_skip_resumed_batch(
+                epoch=epoch,
+                batch_idx=batch_idx,
+                resume_epoch=resume_epoch,
+                resume_batch_idx=resume_batch_idx,
+            ):
                 accelerator.print("skip {}-th batch".format(batch_idx))
                 continue
 
@@ -407,16 +335,10 @@ def train(opt):
             if accelerator.sync_gradients and accelerator.is_main_process:
                 global_completed_steps += 1
 
-            # 2. pack into tensor (ALL ranks do this)
-            step_tensor = torch.tensor(
-                global_completed_steps,
-                device=accelerator.device,
-                dtype=torch.long,
+            # 2. synchronize from rank 0 when distributed training is active.
+            global_completed_steps = synchronize_global_step(
+                global_completed_steps, accelerator
             )
-            # 3. broadcast in-place (ALL ranks must call)
-            dist.broadcast(step_tensor, src=0)
-            # 4. unpack back to python int
-            global_completed_steps = step_tensor.item()
 
             reached_max_train_steps = (
                 opt.max_train_steps is not None

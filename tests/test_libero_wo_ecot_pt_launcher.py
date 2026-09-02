@@ -4,6 +4,7 @@ import importlib.util
 import subprocess
 import tempfile
 import unittest
+import shlex
 from pathlib import Path
 
 
@@ -25,6 +26,7 @@ class LiberoWoEcotPtLauncherTest(unittest.TestCase):
         self,
         mode: str,
         *,
+        arm: str | None = None,
         provide_run_id: bool = True,
         extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
@@ -39,8 +41,11 @@ class LiberoWoEcotPtLauncherTest(unittest.TestCase):
             env.pop("ZR0_WANDB_RUN_ID", None)
         if extra_env:
             env.update(extra_env)
+        command = ["bash", str(LAUNCHER), mode]
+        if arm is not None:
+            command.append(arm)
         return subprocess.run(
-            ["bash", str(LAUNCHER), mode],
+            command,
             cwd=ROOT,
             env=env,
             text=True,
@@ -149,6 +154,104 @@ class LiberoWoEcotPtLauncherTest(unittest.TestCase):
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
 
         self.assertIn("wandb==0.29.0", requirements.splitlines())
+
+    def test_three_experiment_arms_differ_only_in_allowed_controls(self):
+        commands = {
+            arm: self.run_launcher("train", arm=arm)
+            for arm in ("baseline_fa2", "baseline_sdpa", "difference_query")
+        }
+        for arm, result in commands.items():
+            self.assertEqual(result.returncode, 0, f"{arm}: {result.stderr}")
+
+        baseline_fa2 = commands["baseline_fa2"].stdout
+        baseline_sdpa = commands["baseline_sdpa"].stdout
+        difference_query = commands["difference_query"].stdout
+        self.assertNotIn("--vlm_attention_backend", baseline_fa2)
+        self.assertNotIn("--use_difference_query", baseline_fa2)
+        self.assertIn("--vlm_attention_backend sdpa", baseline_sdpa)
+        self.assertNotIn("--use_difference_query", baseline_sdpa)
+        self.assertIn("--vlm_attention_backend sdpa", difference_query)
+        self.assertIn("--use_difference_query", difference_query)
+        self.assertIn("--num_difference_queries 32", difference_query)
+
+        def normalized(command: str) -> list[str]:
+            tokens = shlex.split(command)
+            flags_with_values = {
+                "--vlm_attention_backend",
+                "--num_difference_queries",
+                "--output_ckpt_dir",
+                "--tensorboard_log_dir",
+                "--wandb_run_name",
+                "--wandb_group",
+            }
+            normalized_tokens = []
+            index = 0
+            while index < len(tokens):
+                token = tokens[index]
+                if token in flags_with_values:
+                    index += 2
+                    continue
+                if token == "--use_difference_query":
+                    index += 1
+                    continue
+                if token == "--wandb_tags":
+                    break
+                normalized_tokens.append(token)
+                index += 1
+            return normalized_tokens
+
+        expected = normalized(baseline_fa2)
+        self.assertEqual(normalized(baseline_sdpa), expected)
+        self.assertEqual(normalized(difference_query), expected)
+
+    def test_unknown_experiment_arm_fails(self):
+        result = self.run_launcher("train", arm="unknown-arm")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("experiment arm", result.stderr)
+
+    def test_launcher_records_experiment_metadata_before_exec(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            for executable in ("python", "accelerate"):
+                path = fake_bin / executable
+                path.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+                path.chmod(0o755)
+
+            output_dir = root / "experiment-output"
+            env = os.environ.copy()
+            env.pop("ZR0_DRY_RUN", None)
+            env.update(
+                {
+                    "PATH": f"{fake_bin}:{env['PATH']}",
+                    "ZR0_OUTPUT_DIR": str(output_dir),
+                    "ZR0_RUN_NAME": "metadata-test-run",
+                    "ZR0_WANDB_RUN_ID": "meta1234",
+                    "WANDB_API_KEY": "test-secret-that-must-not-be-printed",
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", str(LAUNCHER), "train", "difference_query"],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            experiment_doc = output_dir / "experiment.md"
+            self.assertTrue(experiment_doc.is_file())
+            contents = experiment_doc.read_text(encoding="utf-8")
+            self.assertIn("## Runtime launch record", contents)
+            self.assertIn("`difference_query`", contents)
+            self.assertIn("`metadata-test-run`", contents)
+            self.assertIn("`meta1234`", contents)
+            self.assertIn("--use_difference_query", contents)
+            self.assertIn("--vlm_attention_backend sdpa", contents)
 
 
 class LiberoWoEcotPtPreflightTest(unittest.TestCase):

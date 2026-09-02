@@ -1,6 +1,5 @@
 import torch
-import time
-import torch.distributed as dist
+from types import MethodType
 
 from torch import nn
 from peft import LoraConfig, TaskType, get_peft_model
@@ -8,21 +7,85 @@ from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor, Qwen
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.utils import is_flash_attn_2_available
 
+from .difference_query import (
+    DifferenceQuery,
+    ResolvedDifferenceQueryConfig,
+    build_difference_query_sequence,
+    resolve_difference_query_config,
+)
+
+
+QUERY_PLACEHOLDER_TOKEN_ID = 0
+QUERY_GENERATION_ERROR = (
+    "autoregressive generation is not implemented with Difference Query"
+)
+
+
+def _reject_difference_query_generation(_model, *args, **kwargs):
+    raise NotImplementedError(QUERY_GENERATION_ERROR)
+
+
+def _unwrap_qwen_model(model: nn.Module) -> nn.Module:
+    if hasattr(model, "get_base_model"):
+        return model.get_base_model()
+    return model
+
 
 def _get_qwen_final_text_norm(model: nn.Module) -> nn.Module:
-    if hasattr(model, "get_base_model"):
-        model = model.get_base_model()
+    model = _unwrap_qwen_model(model)
     return model.model.language_model.norm
+
+
+def _get_qwen_multimodal_model(model: nn.Module) -> nn.Module:
+    return _unwrap_qwen_model(model).model
+
+
+def _get_qwen_hidden_size(model: nn.Module) -> int:
+    return int(_unwrap_qwen_model(model).config.text_config.hidden_size)
+
+
+def _get_qwen_initializer_std(model: nn.Module) -> float:
+    text_config = _unwrap_qwen_model(model).config.text_config
+    return float(getattr(text_config, "initializer_range", 0.02))
 
 
 class QwenVLBackbone(nn.Module):
     def __init__(
-        self, model_name: str, tune_vlm: bool, lora_args: dict
+        self,
+        model_name: str,
+        tune_vlm: bool,
+        lora_args: dict,
+        use_difference_query: bool | None = None,
+        num_difference_queries: int | None = None,
+        vlm_attention_backend: str | None = None,
+        resolved_difference_query_config: ResolvedDifferenceQueryConfig | None = None,
     ):
         super().__init__()
 
         self.tune_vlm = tune_vlm
-        if is_flash_attn_2_available():
+        if resolved_difference_query_config is None:
+            resolved_difference_query_config = resolve_difference_query_config(
+                model_name,
+                None,
+                use_difference_query=use_difference_query,
+                num_difference_queries=num_difference_queries,
+                vlm_attention_backend=vlm_attention_backend,
+            )
+        elif any(
+            value is not None
+            for value in (
+                use_difference_query,
+                num_difference_queries,
+                vlm_attention_backend,
+            )
+        ):
+            raise ValueError(
+                "pass either resolved_difference_query_config or raw Difference Query options"
+            )
+
+        if resolved_difference_query_config.attention_backend is not None:
+            attn_implementation = resolved_difference_query_config.attention_backend
+        elif is_flash_attn_2_available():
             attn_implementation = "flash_attention_2"
         else:
             print(
@@ -61,11 +124,99 @@ class QwenVLBackbone(nn.Module):
             self.model.gradient_checkpointing_enable()
 
         self.processor = AutoProcessor.from_pretrained(model_name)
+        self.use_difference_query = resolved_difference_query_config.enabled
+        self.num_difference_queries = (
+            resolved_difference_query_config.num_difference_queries
+        )
+        self.query_placeholder_token_id = QUERY_PLACEHOLDER_TOKEN_ID
+        self.difference_query = None
+        hidden_size = _get_qwen_hidden_size(self.model)
+        expected_hidden_size = resolved_difference_query_config.expected_hidden_size
+        if expected_hidden_size is not None and expected_hidden_size != hidden_size:
+            raise ValueError(
+                "Difference Query checkpoint hidden size does not match the VLM: "
+                f"{expected_hidden_size} != {hidden_size}"
+            )
+        if self.use_difference_query:
+            self._validate_query_placeholder_token()
+            self.difference_query = DifferenceQuery(
+                num_queries=self.num_difference_queries,
+                hidden_size=hidden_size,
+                initializer_std=_get_qwen_initializer_std(self.model),
+            )
+            checkpoint_tensor = resolved_difference_query_config.checkpoint_tensor
+            if checkpoint_tensor is not None:
+                with torch.no_grad():
+                    self.difference_query.weight.copy_(checkpoint_tensor)
+            self._install_generation_guard()
+
+        actual_backend = getattr(
+            _unwrap_qwen_model(self.model).config,
+            "_attn_implementation",
+            attn_implementation,
+        )
+        if self.use_difference_query and actual_backend != "sdpa":
+            raise ValueError(
+                f"Difference Query requires SDPA, but Qwen loaded {actual_backend!r}"
+            )
+        print(f"Qwen attention backend: {actual_backend}")
         self.set_trainable_parameters()
+
+    def _validate_query_placeholder_token(self) -> None:
+        tokenizer = self.processor.tokenizer
+        token = tokenizer.convert_ids_to_tokens(self.query_placeholder_token_id)
+        if token != "!":
+            raise ValueError(
+                "Difference Query placeholder token id 0 must map to the ordinary token '!'"
+            )
+
+        special_ids = set(getattr(tokenizer, "all_special_ids", ()))
+        config = _unwrap_qwen_model(self.model).config
+        for attribute in (
+            "image_token_id",
+            "video_token_id",
+            "vision_start_token_id",
+            "vision_end_token_id",
+            "pad_token_id",
+            "eos_token_id",
+            "bos_token_id",
+        ):
+            value = getattr(config, attribute, None)
+            if isinstance(value, int):
+                special_ids.add(value)
+        for value in (
+            getattr(tokenizer, "pad_token_id", None),
+            getattr(tokenizer, "eos_token_id", None),
+            getattr(tokenizer, "bos_token_id", None),
+        ):
+            if isinstance(value, int):
+                special_ids.add(value)
+        if self.query_placeholder_token_id in special_ids:
+            raise ValueError(
+                "Difference Query placeholder token id 0 must not be a special token"
+            )
 
     def set_trainable_parameters(self):
         if not self.tune_vlm:
             self.model.requires_grad_(False)
+
+    def _install_generation_guard(self) -> None:
+        generation_models = (self.model, _unwrap_qwen_model(self.model))
+        guarded_ids = set()
+        for generation_model in generation_models:
+            if id(generation_model) in guarded_ids or not hasattr(
+                generation_model, "generate"
+            ):
+                continue
+            generation_model.generate = MethodType(
+                _reject_difference_query_generation, generation_model
+            )
+            guarded_ids.add(id(generation_model))
+
+    def generate(self, *args, **kwargs):
+        if self.use_difference_query:
+            raise NotImplementedError(QUERY_GENERATION_ERROR)
+        return self.model.generate(*args, **kwargs)
         
     def set_frozen_modules_to_eval_mode(self):
         if self.training and not self.tune_vlm:
@@ -159,17 +310,29 @@ class QwenVLBackbone(nn.Module):
 
         return mask
 
-    def forward(self, vl_inputs: BatchFeature) -> BatchFeature:
+    def forward(
+        self, vl_inputs: BatchFeature, compute_vlm_loss: bool = True
+    ) -> BatchFeature:
         # set frozen module to eval
         self.set_frozen_modules_to_eval_mode()
 
+        if self.use_difference_query:
+            return self._forward_with_difference_query(
+                vl_inputs, compute_vlm_loss=compute_vlm_loss
+            )
+
         use_cache = False if self.training else True
-        model_outputs = self.model(**vl_inputs, return_dict=True, 
-                                   output_hidden_states=True, use_cache=use_cache)
+        model_outputs = self.model(
+            **vl_inputs,
+            return_dict=True,
+            output_hidden_states=True,
+            use_cache=use_cache,
+        )
 
         # Transformers records Qwen3-VL decoder outputs before its final RMSNorm.
         raw_last_hidden_state = model_outputs["hidden_states"][-1]
         embeddings = _get_qwen_final_text_norm(self.model)(raw_last_hidden_state)
+        vlm_loss = model_outputs["loss"] if "labels" in vl_inputs else None
 
         # let the action expert only attend to the input (i.e., "image+text prompt" part) of the VLM,
         # including the generation prompt '<|im_start|>assistant\n'. Thus, during inference, we should set `add_generation_prompt` to True.
@@ -193,7 +356,97 @@ class QwenVLBackbone(nn.Module):
             data={
                 "backbone_embeddings": embeddings,
                 "action_expert_cross_attn_mask": action_expert_cross_attn_mask,
-                "vlm_loss": model_outputs["loss"] if "labels" in vl_inputs else None
+                "vlm_loss": vlm_loss
+            }
+        )
+
+    def _forward_with_difference_query(
+        self, vl_inputs: BatchFeature, *, compute_vlm_loss: bool
+    ) -> BatchFeature:
+        sequence = build_difference_query_sequence(
+            vl_inputs["input_ids"],
+            vl_inputs["attention_mask"],
+            labels=vl_inputs.get("labels"),
+            num_queries=self.num_difference_queries,
+            placeholder_token_id=self.query_placeholder_token_id,
+        )
+
+        inputs_embeds = self.model.get_input_embeddings()(
+            sequence.auxiliary_input_ids
+        )
+        query_values = self.difference_query.for_batch(
+            batch_size=inputs_embeds.shape[0], reference=inputs_embeds
+        )
+        query_mask = torch.zeros_like(
+            sequence.auxiliary_input_ids, dtype=torch.bool
+        )
+        query_mask.scatter_(1, sequence.query_positions, True)
+        inputs_embeds = inputs_embeds.masked_scatter(
+            query_mask.unsqueeze(-1).expand_as(inputs_embeds),
+            query_values,
+        )
+
+        qwen_model = _get_qwen_multimodal_model(self.model)
+        position_ids, _ = qwen_model.get_rope_index(
+            sequence.auxiliary_input_ids,
+            image_grid_thw=vl_inputs.get("image_grid_thw"),
+            video_grid_thw=vl_inputs.get("video_grid_thw"),
+            attention_mask=sequence.valid_attention_mask,
+        )
+        model_inputs = {
+            "inputs_embeds": inputs_embeds,
+            "attention_mask": sequence.attention_mask,
+            "position_ids": position_ids,
+        }
+        for key in (
+            "pixel_values",
+            "pixel_values_videos",
+            "image_grid_thw",
+            "video_grid_thw",
+        ):
+            if key in vl_inputs:
+                model_inputs[key] = vl_inputs[key]
+        if compute_vlm_loss and sequence.labels is not None:
+            model_inputs["labels"] = sequence.labels
+
+        if compute_vlm_loss:
+            model_outputs = self.model(
+                **model_inputs,
+                return_dict=True,
+                output_hidden_states=True,
+                use_cache=False,
+            )
+            raw_last_hidden_state = model_outputs["hidden_states"][-1]
+            normalized_hidden_state = _get_qwen_final_text_norm(self.model)(
+                raw_last_hidden_state
+            )
+            vlm_loss = (
+                model_outputs["loss"] if sequence.labels is not None else None
+            )
+        else:
+            model_outputs = _get_qwen_multimodal_model(self.model)(
+                **model_inputs,
+                return_dict=True,
+                use_cache=False,
+            )
+            normalized_hidden_state = model_outputs.last_hidden_state
+            vlm_loss = None
+        gather_positions = sequence.query_positions.unsqueeze(-1).expand(
+            -1, -1, normalized_hidden_state.shape[-1]
+        )
+        query_hidden_states = normalized_hidden_state.gather(
+            dim=1, index=gather_positions
+        )
+        action_expert_cross_attn_mask = torch.ones(
+            query_hidden_states.shape[:2],
+            dtype=torch.bool,
+            device=query_hidden_states.device,
+        )
+        return BatchFeature(
+            data={
+                "backbone_embeddings": query_hidden_states,
+                "action_expert_cross_attn_mask": action_expert_cross_attn_mask,
+                "vlm_loss": vlm_loss,
             }
         )
 

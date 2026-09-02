@@ -1,5 +1,5 @@
-import argparse
 from policies.reasoning_vla_policy import ZR0Policy
+from utils.cli_options import parse_server_options
 from utils.websocket_server_policy import WebsocketPolicyServer
 import random
 import numpy as np
@@ -15,19 +15,8 @@ def set_all_seeds(seed=42):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def parse_option():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset_entry', type=str, default="libero_v21",
-                        help="the pre-registration dataset entry in dataset2feature.yaml")
-    parser.add_argument('--ckpt_dir', type=str, help="checkpoint directory")
-    parser.add_argument('--inference_mode', type=str, help="specify the inference mode, in `direct_action` or `subtask_then_action`")
-    parser.add_argument('--window_size', type=int, default=1, help="window size")
-    parser.add_argument('--num_denoised_steps', type=int, default=5, help="number of denoised steps")
-    parser.add_argument('--max_pad_state_and_action_length', type=int, default=64, help="max padding length")
-    parser.add_argument('--port', type=int, default=8000, help="server port")
-    
-    args = parser.parse_args()
-    return args
+def parse_option(args=None):
+    return parse_server_options(args)
 
 def deploy():
     opt = parse_option()
@@ -42,7 +31,10 @@ def deploy():
         "window_size": opt.window_size,
         "num_denoised_steps": opt.num_denoised_steps,
         "max_pad_state_and_action_length": opt.max_pad_state_and_action_length,
-        "device": "cuda:0"
+        "device": "cuda:0",
+        "use_difference_query": opt.use_difference_query,
+        "num_difference_queries": opt.num_difference_queries,
+        "vlm_attention_backend": opt.vlm_attention_backend,
     }
     print(json.dumps(kwargs, indent=2, ensure_ascii=False))
     policy = ZR0Policy(**kwargs)

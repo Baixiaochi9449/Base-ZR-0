@@ -7,11 +7,31 @@ MODEL_PATH=/opt/data/private/lq/models/Qwen3-VL-2B-Instruct
 FAST_PATH="$ROOT_DIR/fast"
 DATASET_PATH=/opt/data/private/lq/datasets/HuggingFaceVLA/libero
 DATASET_ENTRY=libero_wo_ecot_pt
-OUTPUT_DIR=${ZR0_OUTPUT_DIR:-"$ROOT_DIR/outputs/ckpts/Qwen3-VL-2B-Instruct-LIBERO-wo-ECoT-PT-FinalRMSNorm"}
-LOG_BASE_DIR="$ROOT_DIR/outputs/train_logs/Qwen3-VL-2B-Instruct-LIBERO-wo-ECoT-PT-FinalRMSNorm"
+EXPERIMENT_ARM=${2:-baseline_fa2}
+case "$EXPERIMENT_ARM" in
+    baseline_fa2)
+        ARM_SUFFIX=FinalRMSNorm
+        WANDB_GROUP=libero-wo-ecot-pt
+        ;;
+    baseline_sdpa)
+        ARM_SUFFIX=FinalRMSNorm-baseline-sdpa
+        WANDB_GROUP=libero-wo-ecot-pt-baseline-sdpa
+        ;;
+    difference_query)
+        ARM_SUFFIX=FinalRMSNorm-difference-query-nq32
+        WANDB_GROUP=libero-wo-ecot-pt-difference-query
+        ;;
+    *)
+        echo "Unknown experiment arm: $EXPERIMENT_ARM" >&2
+        exit 2
+        ;;
+esac
+OUTPUT_DIR=${ZR0_OUTPUT_DIR:-"$ROOT_DIR/outputs/ckpts/Qwen3-VL-2B-Instruct-LIBERO-wo-ECoT-PT-$ARM_SUFFIX"}
+EXPERIMENT_TEMPLATE="$ROOT_DIR/experiment.md"
+EXPERIMENT_DOC="$OUTPUT_DIR/experiment.md"
+LOG_BASE_DIR="$ROOT_DIR/outputs/train_logs/Qwen3-VL-2B-Instruct-LIBERO-wo-ECoT-PT-$ARM_SUFFIX"
 WANDB_LOCAL_DIR="$ROOT_DIR/outputs/wandb"
 WANDB_PROJECT=ZR-0-LIBERO
-WANDB_GROUP=libero-wo-ecot-pt
 SAVE_STEP_INTERVAL=${ZR0_SAVE_STEP_INTERVAL:-2000}
 MAX_TRAIN_STEPS=${ZR0_MAX_TRAIN_STEPS:-}
 RESUME_CKPT="$OUTPUT_DIR/latest-model-optimizer-lr"
@@ -19,7 +39,7 @@ WANDB_RUN_ID_FILE="$OUTPUT_DIR/.wandb-run-id"
 WANDB_RUN_NAME_FILE="$OUTPUT_DIR/.wandb-run-name"
 
 usage() {
-    echo "Usage: $0 {preflight|train|resume}" >&2
+    echo "Usage: $0 {preflight|train|resume} [baseline_fa2|baseline_sdpa|difference_query]" >&2
 }
 
 print_command() {
@@ -107,8 +127,23 @@ train_args=(
     --wandb_resume "$WANDB_RESUME"
     --wandb_dir "$WANDB_LOCAL_DIR"
     --wandb_group "$WANDB_GROUP"
-    --wandb_tags ablation wo-ecot-pt libero-v21 qwen3-vl-2b
+    --wandb_tags ablation wo-ecot-pt libero-v21 qwen3-vl-2b "$EXPERIMENT_ARM"
 )
+
+case "$EXPERIMENT_ARM" in
+    baseline_fa2)
+        ;;
+    baseline_sdpa)
+        train_args+=(--vlm_attention_backend sdpa)
+        ;;
+    difference_query)
+        train_args+=(
+            --use_difference_query
+            --num_difference_queries 32
+            --vlm_attention_backend sdpa
+        )
+        ;;
+esac
 
 if [[ -n "$MAX_TRAIN_STEPS" ]]; then
     train_args+=(--max_train_steps "$MAX_TRAIN_STEPS")
@@ -120,6 +155,30 @@ if [[ "$mode" == "resume" ]]; then
         --resume_training
     )
 fi
+
+write_experiment_record() {
+    if [[ ! -f "$EXPERIMENT_DOC" ]]; then
+        if [[ ! -f "$EXPERIMENT_TEMPLATE" ]]; then
+            echo "Missing experiment template: $EXPERIMENT_TEMPLATE" >&2
+            return 1
+        fi
+        cp -- "$EXPERIMENT_TEMPLATE" "$EXPERIMENT_DOC"
+    fi
+
+    {
+        printf '\n## Runtime launch record\n\n'
+        printf -- '- 时间：%s\n' "$(date --iso-8601=seconds)"
+        printf -- '- 模式：`%s`\n' "$mode"
+        printf -- '- 实验臂：`%s`\n' "$EXPERIMENT_ARM"
+        printf -- '- 输出目录：`%s`\n' "$OUTPUT_DIR"
+        printf -- '- W&B project/group/run name/run ID：`%s` / `%s` / `%s` / `%s`\n' \
+            "$WANDB_PROJECT" "$WANDB_GROUP" "$RUN_NAME" "$WANDB_RUN_ID"
+        printf -- '- W&B run URL：待 `wandb.init` 成功后补充。\n'
+        printf -- '- 完整启动命令：\n\n```bash\n'
+        print_command env PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES=0,1,2,3 "${train_args[@]}"
+        printf '```\n'
+    } >> "$EXPERIMENT_DOC"
+}
 
 if [[ "${ZR0_DRY_RUN:-0}" == "1" ]]; then
     print_command env PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES=0,1,2,3 "${train_args[@]}"
@@ -146,6 +205,8 @@ if [[ "$mode" == "train" ]]; then
     printf '%s\n' "$WANDB_RUN_ID" > "$WANDB_RUN_ID_FILE"
     printf '%s\n' "$RUN_NAME" > "$WANDB_RUN_NAME_FILE"
 fi
+
+write_experiment_record
 
 mkdir -p "$LOG_DIR" "$WANDB_LOCAL_DIR"
 

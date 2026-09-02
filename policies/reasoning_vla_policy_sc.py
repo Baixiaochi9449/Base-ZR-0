@@ -83,7 +83,10 @@ class ZR0Policy(BasePolicy):
         window_size,
         num_denoised_steps=5,
         max_pad_state_and_action_length=64,
-        device="cuda:0"
+        device="cuda:0",
+        use_difference_query=None,
+        num_difference_queries=None,
+        vlm_attention_backend=None,
     ):
         super().__init__()
         # env params
@@ -107,7 +110,12 @@ class ZR0Policy(BasePolicy):
             root = self.dataset_path
         )
         # load model
-        self.model = ZR0Model.from_pretrained(ckpt_dir).to(device).to(torch.bfloat16)
+        self.model = ZR0Model.from_pretrained(
+            ckpt_dir,
+            use_difference_query=use_difference_query,
+            num_difference_queries=num_difference_queries,
+            vlm_attention_backend=vlm_attention_backend,
+        ).to(device).to(torch.bfloat16)
         self.model.eval()
 
         # use `torch.compile` to speed up inference

@@ -163,7 +163,7 @@ noise/noisy action [B,H,64] -> action+t encoder -> [B,H,2048]
 - **[配置决定]** 当前 fresh run 未提供 `--action_expert_name_or_path`，state encoder、action encoder、DiT、action decoder、position embedding 全部随机初始化（`train_vla.py:188-204`）；step-2000 已训练这些参数。
 - **[代码明确]** 从完整 ZR checkpoint 微调/推理时，动作专家从 `action_expert.safetensors` 全量加载（`model/reasoning_vla_model.py:34-38,166-174`）。
 - **[代码明确]** 没有 VLM-to-DiT projector：代码要求两边都是 2048，projector 被注释（`model/flow_matching_action_head.py:343-348`）。
-- **[代码明确]** 没有 Resampler、Query Token、Difference Query 或独立聚合 token。视觉塔有 Qwen 自带 2x2 patch merger；动作位置 embedding、state/action MLP 是新增连接模块。
+- **[代码明确]** 默认关闭 Difference Query 时没有 Resampler、Query Token 或独立聚合 token；可选 Difference Query 的当前实现与数据流见第 18 节。视觉塔有 Qwen 自带 2x2 patch merger；动作位置 embedding、state/action MLP 是新增连接模块。
 - **[配置决定]** LoRA 是可选 adapter，当前 `use_lora=False`；启用时目标模块由 CLI 指定，默认 `gate_proj,up_proj,down_proj`（`train_vla.py:69-75`; `model/qwen_vl_backbone.py:41-51`）。
 
 ## 4. VLM 输入和 token 排列
@@ -176,7 +176,7 @@ noise/noisy action [B,H,64] -> action+t encoder -> [B,H,2048]
 | 当前图像 | 每相机 RGB，训练元数据 256x256x3 | PIL RGB -> 224x224 -> normalize/patchify | 24 层 vision tower + merger | **49/图** | 相机名称文本之后 | 都使用 |
 | 历史图像 | `[window,C,H,W]` | 与当前图相同；时间优先、相机次优先 | 同上 | `49 * 相机数 * 历史帧数` | 当前帧之前 | `window_size>1` 时都使用；当前配置为 1 |
 | 机器人状态 | 当前 LIBERO `[8] float32` | quantile norm、右补零到 64 | state MLP | **不进入 VLM**；动作专家 1 token | 动作专家序列首位 | 都使用 |
-| Difference Query / query | 无 | 无 | 无 | 0 | 不存在 | 都不存在 |
+| Difference Query / query | 默认无；开启为 `[Nq,2048]` FP32 learnable 参数 | 插入 VLM embedding 序列 | `[B,Nq,2048]` | 默认 0；实验 32 | context 后、target 前 | 开启时训练/直接动作推理 |
 | Chat/视觉特殊 token | `<|im_start|>`, role, `<|vision_start|>`, image placeholders, `<|vision_end|>`, `<|im_end|>` | chat template/processor 插入 | token embedding/视觉特征替换 | 随图片数 | 包围对应内容 | 都使用 |
 | `<robot_action_N>` | FAST 量化后的动作码字符串 | 仅训练 assistant 输出中构造 | 官方 ZR tokenizer 中每码 1 special token；当前 step-2000 中会拆成普通子词 | 随 FAST 输出 | assistant marker 之后 | 仅训练文本目标；不作为连续动作专家 token |
 | `<SUB_TASK>...</SUB_TASK>` | ECoT 的首个 To-do Action 或 `done` | 10% ECoT 样本选择；two-stage 推理生成 | 普通 VLM token/special token | 随文本变化 | assistant marker 之后 | 仅 ECoT two-stage 训练/推理 |
@@ -278,7 +278,7 @@ last_hidden:     [1, 143, 2048] bf16, CUDA
 - **[配置决定]** 当前环境有 FlashAttention 2 时 wrapper 选 `flash_attention_2`，否则 eager（`qwen_vl_backbone.py:18-31`）。FA2 通常保留 2D padding 信息并使用 causal 标志；eager 等价为 `[B,1,L,L]` additive mask，允许值 0、阻断值为 dtype 最小值。逻辑可见性相同。
 - **[代码明确]** mRoPE `position_ids` 由 Qwen 内部按 temporal/height/width 构造，shape `[3,B,L]`；padding 位置被排除（Transformers source `:916-1033,1177-1229`）。
 
-矩阵中的“按序”表示只有 key 位于 query 左侧或自身时可见。机器人状态、Difference Query、连续动作 token 根本不在 VLM 序列。
+下表描述 `use_difference_query=False` 的默认基线；矩阵中的“按序”表示只有 key 位于 query 左侧或自身时可见。机器人状态和连续动作 token 不在 VLM 序列；开启 Query 后的矩阵见第 18 节。
 
 | VLM Query \ Key | 图像 | 本体状态 | 文本 | Difference Query | VLM 离散动作 token |
 |---|---:|---:|---:|---:|---:|
@@ -328,12 +328,12 @@ SA 层中 `causal_mask_in_self_attn=false`，state 与所有 action token 双向
 - 两者是**先串行、后在动作专家每个 CA 层交互**：VLM 完整 forward 一次，动作专家的第 1/2/3/5/6/7 层读取 VLM **final hidden state 的被选前缀**。
 - 传递方式是 cross-attention；VLM hidden 作 K/V，state/action 作 Q。没有把 VLM token 与动作 token 拼成一套联合 self-attention。
 - direct 读取全部 prompt（图像、相机标签、task、chat specials、assistant marker），不读取 assistant ECoT 或 VLM 离散动作 token。
-- subtask 读取 prompt + 生成/监督 subtask；subtask 只是 VLM 普通 token，不是 Query Token。
+- 默认 subtask 路径读取 prompt + 生成/监督 subtask；subtask 只是 VLM 普通 token，不是 Query Token。Difference Query 模式明确禁止 autoregressive `.generate()`。
 - 两边 hidden 都是 2048，因此没有 projector。若不相等，代码直接 assert，不能自动投影。
 - 动作信息不会写回 VLM；VLM token 永远看不到 state/连续动作 token。
 - 不共享 attention 层、QKV、norm 或 KV cache。VLM 用 mRoPE；DiT action position 用 learned embedding，DiT block 自身配置无 positional embedding。
 - 默认 `detach_vlm_outputs_for_action_expert=False`，flow loss 会经 cross-attention K/V 回传到 VLM；设为 True 时在 `ZR0Model.forward` 对 VLM hidden `.detach()`（`reasoning_vla_model.py:125-129`）。
-- 没有“只读 Query”的开关；仅有 direct prompt 与 prompt+subtask 两种截止 mask。
+- 默认关闭 Query 时仅有 direct prompt 与 prompt+subtask 两种截止 mask；开启后动作专家严格只读取 `[B,Nq,2048]` Query hidden。
 
 ### 8.2 逐层伪代码
 
@@ -670,3 +670,58 @@ VLM 在一个 action chunk 内只算一次，供 5 个动作专家 step 复用�
 | 可训练参数 | 当前训练 100%；policy 推理 0 | 训练日志；`from_pretrained` 默认参数 |
 | 当前 checkpoint | step 2000，128,000 global samples，中间态 | DeepSpeed state + checkpoint 目录 |
 
+## 18. 可选 Difference Query（当前实现）
+
+### 18.1 开关、参数和 backend
+
+- `use_difference_query` 在 Python/CLI 加载接口中是真三态，默认 `None`；CLI 用 `--use_difference_query` / `--no-use_difference_query` 表达显式开/关。`num_difference_queries` 为 `Optional[int]`。没有 Query checkpoint 且未显式开启时保持原行为；只有显式开启才允许随机初始化，未指定 Nq 时取 32。
+- Query checkpoint 会自动启用。显式关闭、显式 Nq 或 backend 与 checkpoint 冲突会直接报错。`enabled=false` config 是明确架构声明，不等于老 checkpoint：它阻止 CLI 开启、校验实际 VLM hidden size，旁边出现 Query 权重视为损坏；只有 config 和 weight 都不存在才允许随机初始化。Query 模式固定使用 SDPA；无 Query 且 backend 为 `None` 时仍按原逻辑自动选择 FlashAttention 2，否则回退 eager。`baseline_sdpa` 是无 Query 的 backend 控制组。
+- learnable 参数 `difference_query.weight` 的精确 shape 为 `[Nq,2048]`。它先在隔离 CPU RNG context 中以 FP32 normal initialization 创建，不推进全局 RNG；forward 时按 token embedding 的 dtype/device 转换。Nq=8/32/64 分别新增 16,384/65,536/131,072 个参数。
+- 当前 Nq=32 实验臂相对同一随机 Action Expert 基线只新增 65,536 参数。开关关闭时不创建 Query 参数、不扩 tokenizer、不增加 loss，也不改变原二维 Qwen mask 或动作专家输入。
+
+### 18.2 序列与 mRoPE
+
+设右 padding 前有效 prompt/context 为 C、learnable Query 为 Q、首个 `labels != -100` 起的 teacher-forced target 为 T、padding 为 P。逐样本重排为：
+
+```text
+训练:           [C, Q, T, P]
+direct inference: [C, Q, P]
+```
+
+辅助 token ID 使用 Qwen 普通词表 ID 0（`!`），构造时断言它不是视觉、padding、EOS、BOS 或其他 control special token。辅助 ID 只用于 token embedding、视觉 placeholder 对齐和 `get_rope_index`；对应 embedding 随后被真实 learnable Query 覆盖。二维有效位 mask 排除 P，mRoPE 由扩展后的辅助 ID、实际 `image_grid_thw` 和该有效位 mask 计算，因此原视觉 placeholder、vision feature scatter、DeepStack 注入位置及视觉 position IDs 保持对齐。
+
+### 18.3 VLM attention mask
+
+传给 Qwen SDPA 的实际 mask 为 `[B,1,L+Nq,L+Nq] bool`，与 embedding 同 device，`True` 表示可见：
+
+| Query \ Key | C | Q | T | P |
+|---|---|---|---|---|
+| C | causal | False | False | False |
+| Q | True | 双向 True | False | False |
+| T | False | True | causal | False |
+| P | False | False | False | False |
+
+因此改变 T 不会改变 Q，改变 C 会改变 Q；所有有效行都不能读 P，P 行也完全屏蔽。只要求 SDPA 在全屏蔽 P 行产生有限 attention 输出，不要求残差/MLP 后 P hidden 为零。
+
+### 18.4 动作条件、loss 与限制
+
+Qwen 最后一层 decoder hidden 仍经过现有 final RMSNorm。随后按逐样本 Query position gather：
+
+```text
+backbone_embeddings:                 [B,Nq,2048]
+action_expert_cross_attn_mask:        [B,Nq] bool，全 True
+```
+
+`ZR0Model` 在训练和直接动作去噪边界检查 batch、Nq、hidden size、mask shape/dtype/device、全 True 和有限性。Flow Matching、DiT、state/action encoder 和 action decoder 未修改；没有独立 Query loss，action loss 通过动作专家 cross-attention 回传到 Query。Qwen 冻结时 Query 仍可训练。`detach_vlm_outputs_for_action_expert=True` 与 Query action-only 训练冲突并报错。
+
+Query-on 的 `loss_type=action` 和 direct-action 保留 labels 供 Query 序列构建器识别 C/T，但调用 Qwen 原生 multimodal base forward，直接取得 final normalized hidden；不会执行 conditional LM head、分配 `[B,L,V]` 全词表 logits 或计算 CE。Query-on 的 `loss_type=vlm` / `vlm_and_action` 仍走 conditional teacher-forced LM loss。Query-off 则无论 action-only 还是 direct 都严格走 `Qwen3VLForConditionalGeneration.forward`，保留原 `input_ids`、二维 mask、labels、`output_hidden_states=True`、训练/推理 `use_cache` 和 PEFT/LoRA wrapper/hook；有 labels 时即使 CE 不进入 action-only 总 loss，也保留 LM head/logits/CE 计算。两种 action 条件路径的 final hidden 在固定输入下于测试容差内一致，但计算成本不同。Query 模式的 wrapper、公开 `backbone.model.generate()` 和 PEFT base model 的 autoregressive `.generate()` 都在真正生成前抛出 `NotImplementedError`；guard 使用模块级具名方法，加载时重新安装，不进入 checkpoint state。
+
+### 18.5 checkpoint 与入口
+
+每次 `save_pretrained` 都写 `difference_query_config.json`；启用时另写单键 FP32 `difference_query.safetensors`，关闭时不保留 Query 权重。VLM/action 两个规范化加载目录会分别检查 config/weight 配对、enabled、Nq、hidden size、tensor shape 和数值有限性；两处都有声明时 config 必须完全相同，启用时权重也必须完全相同。普通保存、DeepSpeed 的 `latest-model-optimizer-lr` 导出、`from_pretrained`、train CLI、policy/server 和 direct-action 均使用同一解析器。真实 tiny Qwen+真实 processor+真实 Action Expert 的完整 round-trip 已验证 Query、backbone hidden 和固定种子动作一致。
+
+### 18.6 公平实验和验证状态
+
+`scripts/run_libero_wo_ecot_pt.sh` 提供 `baseline_fa2`、`baseline_sdpa`、`difference_query` 三臂。三者的 Qwen3-VL-2B、随机 Action Expert、seed 42、数据、global batch 64、8 epochs、optimizer/scheduler、H=10 和评估参数相同；仅 Query/backend、输出目录和 W&B 标识不同。`baseline_fa2` 是原 HEAD 调用兼容基线，`baseline_sdpa` 只改变 attention backend；`difference_query` 的 action-only 使用高效 base-model 路径。正式 train/resume 在启动前把根目录实验模板写入对应 `OUTPUT_DIR/experiment.md`，并追加 arm、时间、W&B 标识和完整命令。Query+SDPA 与 FA2 基线同时改变了压缩方式和 backend，必须用无 Query+SDPA 控制组分离 backend 影响；三臂成功率仍按相同 batch、数据和优化配置比较，但运行时间/显存因调用层级不同，不能直接作为 Query 加速结论。
+
+自动验证覆盖关闭路径 HEAD 参数/PEFT hook/final hidden/mask/固定种子动作 golden、向量化 C/Q/T/P mask 与最大长度 CPU 结构、Nq=8/32/64 的 mask/真实 Qwen/direct-action、隔离 RNG、disabled/enabled/checkpoint 损坏分支与真实 round-trip、隔离 CLI `None/True/False/Nq`、底层 generate 拒绝、Query-on action-only LM-head 拒绝、tiny Qwen 的 T/C 隔离、真实 PIL processor+vision+DeepStack+mRoPE，以及 tiny Qwen+真实 tiny Action Expert 的 action-only backward/direct denoise。恢复测试跨两个 epoch，并覆盖单进程未初始化 distributed；batch 前缀只在恢复 epoch 跳过，后续 epoch 不重复跳过。CUDA BF16 tiny Query 已实际捕获 efficient SDPA kernel；ZeRO-2 的独立 `torchrun` world-size=1 与 2-rank 已实际通过生产 helper 的更新、Query sidecar/model/optimizer/scheduler/global-step 保存恢复及继续一步，并验证跨 rank Query 一致和有限性；4-GPU 真实 2B 生产 smoke 未执行。正式训练和 LIBERO rollout 尚未执行；97.6% 仅是官方 checkpoint 的历史评估参考，不是本三臂结果。
