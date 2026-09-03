@@ -28,6 +28,21 @@ demo_data.libero_v21:
   dataset_type: vla
   sample_ratio: 1.0
   use_quantile: true
+molmoact_tabletop_v3_stage05:
+  dataset_path: /opt/data/private/lq/datasets/molmoact_dataset_tabletop-v3_stage05
+  dataset_type: vla
+  dataset_adapter: lerobot_v3_future_difference
+  target_text_field: train_data
+  camera_keys:
+    - first_view
+    - second_view
+    - wrist_image
+  state_field: state
+  action_field: actions
+  stats_path: meta/stats_gr00t.json
+  training_eligibility_exists: false
+  use_quantile: true
+  sample_ratio: 1.0
 libero_wo_ecot_pt:
   dataset_path: /opt/data/private/lq/datasets/HuggingFaceVLA/libero
   dataset_type: vla

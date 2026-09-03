@@ -1,3 +1,6 @@
+import logging
+
+
 class WandbTrainingLogger:
     def __init__(
         self,
@@ -15,6 +18,7 @@ class WandbTrainingLogger:
         self.accelerator = accelerator
         self.enabled = bool(project)
         self.run = None
+        self._pending = []
 
         if self.enabled and accelerator.is_main_process:
             import wandb
@@ -45,8 +49,43 @@ class WandbTrainingLogger:
                 reduced_metrics[name] = reduced_value.item()
 
         if self.run is not None:
-            self.run.log({**reduced_metrics, **scalar_metrics}, step=step)
+            payload = ({**reduced_metrics, **scalar_metrics}, step)
+            pending = [*self._pending, payload]
+            self._pending = []
+            for index, (metrics, pending_step) in enumerate(pending):
+                try:
+                    self.run.log(metrics, step=pending_step)
+                except Exception as error:
+                    self._pending.extend(pending[index:])
+                    logging.getLogger(__name__).warning(
+                        "W&B logging failed after training started; retained %d "
+                        "payload(s) for retry while local logs remain authoritative: %s",
+                        len(self._pending),
+                        error,
+                    )
+                    break
 
     def finish(self, exit_code=0):
         if self.run is not None:
-            self.run.finish(exit_code=exit_code)
+            if self._pending:
+                pending = self._pending
+                self._pending = []
+                for index, (metrics, pending_step) in enumerate(pending):
+                    try:
+                        self.run.log(metrics, step=pending_step)
+                    except Exception as error:
+                        self._pending.extend(pending[index:])
+                        logging.getLogger(__name__).warning(
+                            "W&B final retry failed; %d payload(s) remain only in "
+                            "authoritative local logs: %s",
+                            len(self._pending),
+                            error,
+                        )
+                        break
+            try:
+                self.run.finish(exit_code=exit_code)
+            except Exception as error:
+                logging.getLogger(__name__).warning(
+                    "W&B finish failed after local training state was saved: %s",
+                    error,
+                )

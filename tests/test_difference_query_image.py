@@ -103,6 +103,19 @@ class DifferenceQueryImageTest(unittest.TestCase):
         deepstack_records = []
         original_placeholder = model.model.get_placeholder_mask
         original_deepstack = model.model.language_model._deepstack_process
+        original_lm_head = model.lm_head
+
+        class CountingLMHead(nn.Module):
+            def __init__(self, wrapped):
+                super().__init__()
+                self.wrapped = wrapped
+                self.sequence_lengths = []
+
+            def forward(self, hidden_states):
+                self.sequence_lengths.append(hidden_states.shape[1])
+                return self.wrapped(hidden_states)
+
+        counting_lm_head = CountingLMHead(original_lm_head)
 
         def record_placeholder(
             input_ids, inputs_embeds, image_features=None, video_features=None
@@ -149,6 +162,20 @@ class DifferenceQueryImageTest(unittest.TestCase):
             original_placeholder_record = placeholder_records.pop()
             original_deepstack_record = deepstack_records.pop()
 
+            direct_backbone = QwenVLBackbone.__new__(QwenVLBackbone)
+            nn.Module.__init__(direct_backbone)
+            direct_backbone.tune_vlm = False
+            direct_backbone.model = model
+            direct_backbone.use_difference_query = False
+            direct_backbone.num_difference_queries = None
+            direct_backbone.query_placeholder_token_id = 0
+            direct_backbone.difference_query = None
+            direct_backbone.eval()
+            model.lm_head = counting_lm_head
+            direct_outputs = direct_backbone(inputs, compute_vlm_loss=False)
+            direct_placeholder_record = placeholder_records.pop()
+            direct_deepstack_record = deepstack_records.pop()
+
             backbone = QwenVLBackbone.__new__(QwenVLBackbone)
             nn.Module.__init__(backbone)
             backbone.tune_vlm = False
@@ -166,6 +193,7 @@ class DifferenceQueryImageTest(unittest.TestCase):
         finally:
             model.model.get_placeholder_mask = original_placeholder
             model.model.language_model._deepstack_process = original_deepstack
+            model.lm_head = original_lm_head
 
         sequence = build_difference_query_sequence(
             inputs.input_ids,
@@ -179,6 +207,7 @@ class DifferenceQueryImageTest(unittest.TestCase):
             original_image_token_count,
         )
         self.assertFalse(original_placeholder_record["input_ids_is_none"])
+        self.assertFalse(direct_placeholder_record["input_ids_is_none"])
         self.assertTrue(query_placeholder_record["input_ids_is_none"])
         self.assertEqual(
             int(original_placeholder_record["image_mask"].sum()),
@@ -192,6 +221,9 @@ class DifferenceQueryImageTest(unittest.TestCase):
             original_placeholder_record["feature_rows"], original_image_token_count
         )
         self.assertEqual(
+            direct_placeholder_record["feature_rows"], original_image_token_count
+        )
+        self.assertEqual(
             query_placeholder_record["feature_rows"], original_image_token_count
         )
         torch.testing.assert_close(
@@ -199,7 +231,15 @@ class DifferenceQueryImageTest(unittest.TestCase):
             original_deepstack_record["positions"],
         )
         torch.testing.assert_close(
+            direct_deepstack_record["positions"],
+            original_deepstack_record["positions"],
+        )
+        torch.testing.assert_close(
             query_deepstack_record["embeds"],
+            original_deepstack_record["embeds"],
+        )
+        torch.testing.assert_close(
+            direct_deepstack_record["embeds"],
             original_deepstack_record["embeds"],
         )
 
@@ -220,6 +260,10 @@ class DifferenceQueryImageTest(unittest.TestCase):
             original_positions[:, original_visual_mask],
         )
         self.assertEqual(outputs.backbone_embeddings.shape, (1, 2, 32))
+        self.assertEqual(direct_outputs.backbone_embeddings.shape[:2], inputs.input_ids.shape)
+        self.assertEqual(counting_lm_head.sequence_lengths[0], 0)
+        self.assertEqual(len(counting_lm_head.sequence_lengths), 2)
+        self.assertGreater(counting_lm_head.sequence_lengths[1], 0)
         self.assertTrue(torch.isfinite(outputs.backbone_embeddings).all())
 
 

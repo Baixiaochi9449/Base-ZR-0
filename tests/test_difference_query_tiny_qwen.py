@@ -141,7 +141,7 @@ class TinyQwenDifferenceQueryTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "LM head"):
             backbone(inputs, compute_vlm_loss=True)
 
-    def test_disabled_action_only_preserves_conditional_lm_head_path(self):
+    def test_disabled_action_only_uses_zero_token_lm_head_without_ce(self):
         backbone = self.make_backbone()
         backbone.use_difference_query = False
         backbone.num_difference_queries = None
@@ -166,9 +166,11 @@ class TinyQwenDifferenceQueryTest(unittest.TestCase):
                 super().__init__()
                 self.wrapped = wrapped
                 self.calls = 0
+                self.sequence_lengths = []
 
             def forward(self, hidden_states):
                 self.calls += 1
+                self.sequence_lengths.append(hidden_states.shape[1])
                 return self.wrapped(hidden_states)
 
         counting_lm_head = CountingLMHead(original_lm_head)
@@ -176,7 +178,27 @@ class TinyQwenDifferenceQueryTest(unittest.TestCase):
         with torch.no_grad():
             outputs = backbone(inputs, compute_vlm_loss=False)
         self.assertEqual(counting_lm_head.calls, 1)
-        self.assertIsNotNone(outputs.vlm_loss)
+        self.assertEqual(counting_lm_head.sequence_lengths, [0])
+        self.assertIsNone(outputs.vlm_loss)
+
+        raw_inputs = {
+            "input_ids": inputs["input_ids"],
+            "attention_mask": inputs["attention_mask"],
+            "output_hidden_states": True,
+            "return_dict": True,
+            "use_cache": False,
+        }
+        with torch.no_grad():
+            one_token = backbone.model(**raw_inputs, logits_to_keep=1)
+            zero_token = backbone.model(
+                **raw_inputs,
+                logits_to_keep=torch.empty(0, dtype=torch.long),
+            )
+        self.assertEqual(one_token.logits.shape, (1, 1, 128))
+        self.assertEqual(zero_token.logits.shape, (1, 0, 128))
+        torch.testing.assert_close(
+            zero_token.hidden_states[-1], one_token.hidden_states[-1]
+        )
 
     def test_real_qwen_forward_supports_nq_8_32_64(self):
         inputs = self.inputs(5, (7, 8))

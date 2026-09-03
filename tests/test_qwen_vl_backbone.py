@@ -164,7 +164,7 @@ class QwenVLBackboneTest(unittest.TestCase):
             torch.ones(1, 3, dtype=torch.bool),
         )
 
-    def test_disabled_action_only_uses_conditional_wrapper_with_head_arguments(self):
+    def test_disabled_action_only_uses_conditional_wrapper_without_labels_or_lm_loss(self):
         raw = torch.tensor([[[3.0, 4.0], [0.0, 2.0], [5.0, 1.0]]])
         labels = torch.tensor([[-100, 2, 3]])
 
@@ -190,10 +190,15 @@ class QwenVLBackboneTest(unittest.TestCase):
                 call = base_model.forward_call
                 self.assertIs(call["input_ids"], inputs["input_ids"])
                 self.assertIs(call["attention_mask"], inputs["attention_mask"])
-                self.assertIs(call["labels"], labels)
+                self.assertNotIn("labels", call)
                 self.assertEqual(call["attention_mask"].ndim, 2)
                 self.assertNotIn("inputs_embeds", call)
                 self.assertNotIn("position_ids", call)
+                logits_to_keep = call["logits_to_keep"]
+                self.assertIsInstance(logits_to_keep, torch.Tensor)
+                self.assertEqual(logits_to_keep.dtype, torch.long)
+                self.assertEqual(logits_to_keep.device, inputs["input_ids"].device)
+                self.assertEqual(logits_to_keep.numel(), 0)
                 self.assertTrue(call["return_dict"])
                 self.assertTrue(call["output_hidden_states"])
                 self.assertEqual(call["use_cache"], not training)
@@ -202,7 +207,7 @@ class QwenVLBackboneTest(unittest.TestCase):
                     1,
                     "the PEFT wrapper and its forward hooks must not be bypassed",
                 )
-                self.assertEqual(outputs.vlm_loss.item(), 0.25)
+                self.assertIsNone(outputs.vlm_loss)
                 expected = base_model.model.language_model.norm(raw)
                 torch.testing.assert_close(outputs.backbone_embeddings, expected)
 

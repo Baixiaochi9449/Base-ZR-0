@@ -1,4 +1,5 @@
 import argparse
+import math
 
 
 def _add_difference_query_options(parser: argparse.ArgumentParser) -> None:
@@ -49,6 +50,21 @@ def build_train_parser() -> argparse.ArgumentParser:
         default=8,
         help="batch size per gpu device.",
     )
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=1,
+        help="Number of micro-batches in one optimizer step.",
+    )
+    parser.add_argument(
+        "--expected_global_batch_size",
+        type=int,
+        default=None,
+        help=(
+            "Optional runtime assertion for world_size * per-device batch * "
+            "gradient accumulation steps."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--epochs", type=int, default=16)
     parser.add_argument("--save_ckpt_interval", type=int, default=1)
@@ -57,10 +73,19 @@ def build_train_parser() -> argparse.ArgumentParser:
         "--max_train_steps",
         type=int,
         default=None,
-        help="Optional early-stop step for smoke validation; scheduler horizon remains unchanged.",
+        help="Optional effective optimizer-step limit for training, scheduler, and progress.",
     )
     parser.add_argument(
         "--peak_learning_rate", type=float, default=1e-5, help="peak learning rate"
+    )
+    parser.add_argument("--adam_beta1", type=float, default=0.9)
+    parser.add_argument("--adam_beta2", type=float, default=0.95)
+    parser.add_argument("--adam_epsilon", type=float, default=1e-6)
+    parser.add_argument(
+        "--warmup_ratio",
+        type=float,
+        default=None,
+        help="Optional warmup ratio; unset preserves the legacy 8 percent capped schedule.",
     )
     parser.add_argument(
         "--min_lr_rate",
@@ -83,6 +108,20 @@ def build_train_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wandb_dir", type=str, default="./outputs/wandb")
     parser.add_argument("--wandb_group", type=str)
     parser.add_argument("--wandb_tags", type=str, nargs="*")
+    parser.add_argument(
+        "--logging_steps",
+        type=int,
+        default=10,
+        help="Log optimizer-step metrics at this interval.",
+    )
+    parser.add_argument(
+        "--log_training_diagnostics",
+        action="store_true",
+        help=(
+            "Log opt-in module gradient norms, throughput, memory, and data "
+            "quality diagnostics without changing optimizer parameter groups."
+        ),
+    )
     parser.add_argument(
         "--tune_vlm", action="store_true", help="Whether to fine-tune the VLM"
     )
@@ -130,6 +169,22 @@ def build_train_parser() -> argparse.ArgumentParser:
         "--resume_training", action="store_true", help="whether to resume training"
     )
     parser.add_argument(
+        "--allow_legacy_checkpoint_without_manifest",
+        action="store_true",
+        help=(
+            "Explicitly allow a legacy checkpoint that predates resolved dataset "
+            "manifests; dataset semantics cannot be verified in this mode."
+        ),
+    )
+    parser.add_argument(
+        "--allow_legacy_checkpoint_without_observation_contract",
+        action="store_true",
+        help=(
+            "Explicitly accept a legacy checkpoint manifest that predates the "
+            "versioned observation history contract."
+        ),
+    )
+    parser.add_argument(
         "--save_optimizer_and_lr_states",
         action="store_true",
         help="Whether to save states of the optimizer and the LR scheduler",
@@ -171,6 +226,13 @@ def build_train_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--dataset_sample_ratios",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Optional per-entry sample-ratio overrides in dataset_entries order.",
+    )
+    parser.add_argument(
         "--window_size",
         type=int,
         default=1,
@@ -185,6 +247,21 @@ def build_train_parser() -> argparse.ArgumentParser:
         default=64,
         help="dim size of the max padded state and action",
     )
+    parser.add_argument(
+        "--max_length",
+        type=int,
+        default=1200,
+        help="Maximum multimodal token length; 1200 preserves the legacy default.",
+    )
+    parser.add_argument(
+        "--dataloader_num_workers",
+        type=int,
+        default=None,
+        help=(
+            "Optional DataLoader worker count. Unset keeps 24 for legacy datasets "
+            "and uses 4 for episode-grouped datasets."
+        ),
+    )
     return parser
 
 
@@ -193,6 +270,70 @@ def parse_train_options(args=None) -> argparse.Namespace:
     options = parser.parse_args(args)
     if options.max_train_steps is not None and options.max_train_steps < 1:
         parser.error("--max_train_steps must be at least 1")
+    if options.per_device_train_batch_size < 1:
+        parser.error("--per_device_train_batch_size must be positive")
+    if options.gradient_accumulation_steps < 1:
+        parser.error("--gradient_accumulation_steps must be positive")
+    if (
+        options.expected_global_batch_size is not None
+        and options.expected_global_batch_size < 1
+    ):
+        parser.error("--expected_global_batch_size must be positive")
+    if options.logging_steps < 1:
+        parser.error("--logging_steps must be positive")
+    if options.loss_type not in {"vlm", "action", "vlm_and_action"}:
+        parser.error("--loss_type must be one of [vlm, action, vlm_and_action]")
+    if options.loss_type == "vlm":
+        if not options.tune_vlm:
+            parser.error("--loss_type vlm requires --tune_vlm")
+        if options.tune_action_expert:
+            parser.error("--loss_type vlm forbids --tune_action_expert")
+        if options.action_expert_name_or_path:
+            parser.error(
+                "--loss_type vlm forbids --action_expert_name_or_path"
+            )
+    for name in ("vlm_loss_weight", "action_expert_loss_weight"):
+        value = getattr(options, name)
+        if not math.isfinite(value) or value < 0:
+            parser.error(f"--{name} must be finite and non-negative")
+    if options.loss_type in ("vlm", "vlm_and_action") and options.vlm_loss_weight == 0:
+        parser.error("--vlm_loss_weight must be greater than zero for this --loss_type")
+    if (
+        options.loss_type in ("action", "vlm_and_action")
+        and options.action_expert_loss_weight == 0
+    ):
+        parser.error(
+            "--action_expert_loss_weight must be greater than zero for this --loss_type"
+        )
+    for name in ("adam_beta1", "adam_beta2"):
+        value = getattr(options, name)
+        if not math.isfinite(value) or not 0 <= value < 1:
+            parser.error(f"--{name} must be finite and in [0, 1)")
+    if not math.isfinite(options.adam_epsilon) or options.adam_epsilon <= 0:
+        parser.error("--adam_epsilon must be finite and greater than zero")
+    if options.warmup_ratio is not None and (
+        not math.isfinite(options.warmup_ratio)
+        or not 0 <= options.warmup_ratio <= 1
+    ):
+        parser.error("--warmup_ratio must be finite and in [0, 1]")
+    if options.max_length < 1:
+        parser.error("--max_length must be positive")
+    if options.action_horizon < 1:
+        parser.error("--action_horizon must be positive")
+    if options.dataloader_num_workers is not None and options.dataloader_num_workers < 0:
+        parser.error("--dataloader_num_workers must be non-negative")
+    if options.dataset_sample_ratios is not None:
+        if options.dataset_entries is None or len(options.dataset_sample_ratios) != len(
+            options.dataset_entries
+        ):
+            parser.error(
+                "--dataset_sample_ratios must have the same length as --dataset_entries"
+            )
+        if any(
+            not math.isfinite(ratio) or ratio <= 0 or ratio > 1
+            for ratio in options.dataset_sample_ratios
+        ):
+            parser.error("--dataset_sample_ratios values must be finite and in (0, 1]")
     return options
 
 
@@ -224,6 +365,22 @@ def build_server_parser() -> argparse.ArgumentParser:
         help="max padding length",
     )
     parser.add_argument("--port", type=int, default=8000, help="server port")
+    parser.add_argument(
+        "--allow_legacy_checkpoint_without_manifest",
+        action="store_true",
+        help=(
+            "Explicitly allow a legacy checkpoint that predates resolved dataset "
+            "manifests; dataset semantics cannot be verified in this mode."
+        ),
+    )
+    parser.add_argument(
+        "--allow_legacy_checkpoint_without_observation_contract",
+        action="store_true",
+        help=(
+            "Explicitly accept a legacy checkpoint manifest that predates the "
+            "versioned observation history contract."
+        ),
+    )
     _add_difference_query_options(parser)
     return parser
 

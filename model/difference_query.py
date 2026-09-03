@@ -188,10 +188,20 @@ def build_difference_query_sequence(
         supervised = (labels != -100) & valid_mask
         has_supervision = supervised.any(dim=1)
         first_supervised = supervised.to(dtype=torch.long).argmax(dim=1)
+        positions = torch.arange(original_length, device=input_ids.device).unsqueeze(0)
+        expected_supervision = (
+            (positions >= first_supervised.unsqueeze(1))
+            & (positions < valid_lengths.unsqueeze(1))
+            & has_supervision.unsqueeze(1)
+        )
+        if (supervised != expected_supervision).any():
+            raise ValueError(
+                "supervised assistant target must be contiguous through the final valid token"
+            )
         context_lengths = torch.where(
             has_supervision, first_supervised, valid_lengths
         )
-        target_lengths = valid_lengths - context_lengths
+        target_lengths = supervised.sum(dim=1, dtype=torch.long)
 
     positions = torch.arange(
         extended_length, dtype=torch.long, device=input_ids.device

@@ -131,12 +131,13 @@ class ZR0DifferenceQueryTest(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def make_model(self, **kwargs):
+        loss_type = kwargs.get("loss_type", "vlm_and_action")
         return ZR0Model(
             vlm_name_or_path="base-vlm",
             action_expert_name_or_path=None,
             action_expert_config=self.config,
-            tune_vlm=False,
-            tune_action_expert=True,
+            tune_vlm=loss_type != "action",
+            tune_action_expert=loss_type != "vlm",
             use_difference_query=True,
             num_difference_queries=8,
             **kwargs,
@@ -148,6 +149,9 @@ class ZR0DifferenceQueryTest(unittest.TestCase):
             {
                 "input_ids": torch.ones(batch_size, 3, dtype=torch.long),
                 "attention_mask": torch.ones(batch_size, 3, dtype=torch.long),
+                "labels": torch.tensor(
+                    [[-100, 1, -100]] * batch_size, dtype=torch.long
+                ),
                 "observation.state": torch.ones(batch_size, 2),
                 "state_mask": torch.ones(batch_size, 2, dtype=torch.bool),
                 "action": torch.ones(batch_size, 3, 2),
@@ -156,7 +160,7 @@ class ZR0DifferenceQueryTest(unittest.TestCase):
         )
 
     def test_query_is_optimized_and_action_loss_produces_nonzero_finite_gradient(self):
-        model = self.make_model()
+        model = self.make_model(loss_type="action")
         with torch.no_grad():
             model.backbone.difference_query.weight.fill_(0.5)
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
@@ -165,7 +169,7 @@ class ZR0DifferenceQueryTest(unittest.TestCase):
         self.assertTrue(
             any(query_parameter is parameter for group in optimizer.param_groups for parameter in group["params"])
         )
-        outputs = model(self.batch(), training_progress=0.0, dynamic_loss_type="action")
+        outputs = model(self.batch(), training_progress=0.0)
         outputs.loss.backward()
 
         self.assertIsNotNone(query_parameter.grad)
@@ -174,18 +178,17 @@ class ZR0DifferenceQueryTest(unittest.TestCase):
         self.assertEqual(model.backbone.compute_vlm_loss_calls, [False])
 
     def test_loss_modes_and_direct_action_route_vlm_loss_explicitly(self):
-        model = self.make_model()
         batch = self.batch(batch_size=1)
+        ar_model = self.make_model(loss_type="vlm")
+        joint_model = self.make_model(loss_type="vlm_and_action")
 
-        model(batch, training_progress=0.0, dynamic_loss_type="vlm")
-        model(batch, training_progress=0.0, dynamic_loss_type="vlm_and_action")
-        model.get_action_direct(batch)
-        model.get_n_actions_direct(batch, n=1)
+        ar_model(batch, training_progress=0.0)
+        joint_model(batch, training_progress=0.0)
+        joint_model.get_action_direct(batch)
+        joint_model.get_n_actions_direct(batch, n=1)
 
-        self.assertEqual(
-            model.backbone.compute_vlm_loss_calls,
-            [True, True, False, False],
-        )
+        self.assertEqual(ar_model.backbone.compute_vlm_loss_calls, [True])
+        self.assertEqual(joint_model.backbone.compute_vlm_loss_calls, [True, False, False])
 
     def test_action_conditioning_boundary_rejects_wrong_length_hidden_and_mask(self):
         model = self.make_model()
@@ -212,9 +215,11 @@ class ZR0DifferenceQueryTest(unittest.TestCase):
                     )
 
     def test_action_only_detach_conflict_and_generate_are_rejected(self):
-        model = self.make_model(detach_vlm_outputs_for_action_expert=True)
+        model = self.make_model(
+            loss_type="action", detach_vlm_outputs_for_action_expert=True
+        )
         with self.assertRaisesRegex(ValueError, "detach_vlm_outputs"):
-            model(self.batch(), training_progress=0.0, dynamic_loss_type="action")
+            model(self.batch(), training_progress=0.0)
         with self.assertRaises(NotImplementedError):
             model.get_action_subtask(self.batch())
 

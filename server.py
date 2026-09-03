@@ -35,6 +35,14 @@ def deploy():
         "use_difference_query": opt.use_difference_query,
         "num_difference_queries": opt.num_difference_queries,
         "vlm_attention_backend": opt.vlm_attention_backend,
+        "allow_legacy_checkpoint_without_manifest": (
+            opt.allow_legacy_checkpoint_without_manifest
+        ),
+        "allow_legacy_checkpoint_without_observation_contract": getattr(
+            opt,
+            "allow_legacy_checkpoint_without_observation_contract",
+            False,
+        ),
     }
     print(json.dumps(kwargs, indent=2, ensure_ascii=False))
     policy = ZR0Policy(**kwargs)

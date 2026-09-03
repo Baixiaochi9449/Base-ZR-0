@@ -1,21 +1,57 @@
 import torch
+import copy
 import hashlib
-import time
 import io
 import json
+import math
 import random
-import orjson
+from pathlib import Path
+try:
+    import orjson
+except ImportError:  # The standard-library fallback keeps parquet VQA loading usable.
+    orjson = None
 
 from PIL import Image
 from datasets import load_dataset
 from torchvision.transforms import ToPILImage
-from transformers import AutoProcessor
-from qwen_vl_utils import process_vision_info
+try:
+    from transformers import AutoProcessor
+except ImportError:
+    class AutoProcessor:  # type: ignore[no-redef]
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            raise ImportError("transformers is required to construct training datasets")
 from utils.normalization import min_max_norm
-from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+try:
+    from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+except ImportError:
+    class LeRobotDataset:  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs):
+            raise ImportError("lerobot is required for the lerobot_v2 dataset adapter")
 
-from torch.utils.data import ConcatDataset, DataLoader
+from torch.utils.data import ConcatDataset, DataLoader, Sampler
 from utils.constants import DATASET2FEATURE
+from utils.dataset_adapters import (
+    DATASET_ADAPTERS,
+    process_vision_info,
+    resolve_dataset_adapter_name,
+)
+from utils.dataset_manifest import build_resolved_dataset_manifest
+from utils.dataset_spec import (
+    ObjectiveRequirements,
+    ResolvedDatasetSpec,
+    resolve_dataset_spec,
+    resolve_objective_requirements,
+)
+from utils.training_tokenization import (
+    DatasetIntegrityError,
+    TOKENIZATION_METRIC_SCHEMA,
+    extract_final_assistant_target,
+    is_transient_io_error,
+    run_with_same_sample_retries,
+    token_metric_validity_key,
+    tokenize_chat_with_complete_assistant,
+)
 
 def pad_2d_to_max_length(tensor_2d, max_pad_length=64, pad_value=0.0):
     """
@@ -42,7 +78,37 @@ def pad_2d_to_max_length(tensor_2d, max_pad_length=64, pad_value=0.0):
     ], dim=1)
     return padded_tensor, mask
 
-def prepare_action_expert_inputs_cpu(data, stats, max_pad_length, use_quantile, action_horizon=None, action_dim=None):
+def _v2_action_temporal_valid(data, *, identity="lerobot_v2 sample"):
+    actions = data.get("action")
+    action_is_pad = data.get("action_is_pad")
+    if not isinstance(actions, torch.Tensor) or actions.ndim != 2:
+        raise DatasetIntegrityError(f"{identity}: action must have shape [H, D]")
+    if (
+        not isinstance(action_is_pad, torch.Tensor)
+        or action_is_pad.dtype != torch.bool
+        or action_is_pad.shape != (actions.shape[0],)
+    ):
+        raise DatasetIntegrityError(
+            f"{identity}: action_is_pad must be a bool tensor with shape "
+            f"[{actions.shape[0]}]"
+        )
+    temporal_valid = ~action_is_pad
+    if not temporal_valid.any():
+        raise DatasetIntegrityError(f"{identity}: action horizon has no valid timestep")
+    return temporal_valid
+
+
+def prepare_action_expert_inputs_cpu(
+    data,
+    stats,
+    max_pad_length,
+    use_quantile,
+    action_horizon=None,
+    action_dim=None,
+    *,
+    dataset_entry="lerobot_v2",
+    sample_id="sample=unknown",
+):
     action_expert_inputs = {}
     # a scalar (shape is [])
     # if not isinstance(data["embodiment_id"], torch.Tensor):
@@ -56,48 +122,22 @@ def prepare_action_expert_inputs_cpu(data, stats, max_pad_length, use_quantile, 
     action_expert_inputs["state_mask"] = state_masks           # (1, max_pad_length)
 
     if "action" in data:
+        identity = f"dataset_entry={dataset_entry} {sample_id}".strip()
+        temporal_valid = _v2_action_temporal_valid(data, identity=identity)
         data["norm_action_wo_pad"] = min_max_norm(data["action"], stats["action"], use_quantile) # (action_horizon, action_dim)
         padded_actions, action_masks = pad_2d_to_max_length(data["norm_action_wo_pad"], max_pad_length)
+        action_masks = action_masks.to(torch.bool) & temporal_valid[:, None]
+        padded_actions = padded_actions.masked_fill(~action_masks, 0)
         action_expert_inputs["action"] = padded_actions    # (action_horizon, max_pad_length)
         action_expert_inputs["action_mask"] = action_masks # (action_horizon, max_pad_length)
+        action_expert_inputs["action_supervision_available"] = torch.tensor(True)
+        data["action_temporal_valid"] = temporal_valid
     else:
         infer_action_mask = torch.zeros((action_horizon, max_pad_length), dtype=torch.long)
         infer_action_mask[:, :action_dim] = 1
         action_expert_inputs["infer_action_mask"] = infer_action_mask # (action_horizon, max_pad_length)
 
     return action_expert_inputs
-
-def find_subtensor_index(tensor, sub_tensor):
-    """
-    Find the first occurrence of the 1D sub-string sub_tensor in the 1D tensor tensor, 
-        and return -1 if it is not found
-    """
-    n = sub_tensor.numel()
-    if n == 0 or n > tensor.numel():
-        return -1
-    # create sliding windows of length n on the original tensor
-    windows = tensor.unfold(0, n, 1)          # [L-n+1, n]
-    # compare each window with sub_tensor
-    matches = (windows == sub_tensor).all(dim=1)
-    # find indices where a full match occurs
-    idxs = torch.where(matches)[0]
-    return idxs[0].item() if idxs.numel() > 0 else -1
-
-def mask_prompt_loss_1d(labels_1d: torch.Tensor, assistant_start_ids, pad_token_id):
-    """
-    Mask a single sample (1D) labels:
-    - Set all pad_token_ids to -100.
-    - Set the content before and including the assistant starting tokens to -100.
-    """
-    # pad -> -100
-    if pad_token_id is not None:
-        labels_1d[labels_1d == pad_token_id] = -100
-    # mask prompt（assistant starting token sequence: [151644, 77091, 198]）
-    ast = torch.tensor(list(assistant_start_ids), dtype=labels_1d.dtype, device=labels_1d.device)
-    start_idx = find_subtensor_index(labels_1d, ast)
-    if start_idx != -1:
-        labels_1d[:start_idx + len(ast)] = -100
-    return labels_1d
 
 def convert_fast_tokens_to_vlm_action_seq(fast_tokens: list[int]) -> str:
     """
@@ -106,39 +146,70 @@ def convert_fast_tokens_to_vlm_action_seq(fast_tokens: list[int]) -> str:
     """
     return ''.join([f"<robot_action_{token}>" for token in fast_tokens])
 
-def tokenize_vision_language_inputs(msg, process_mode, processor, max_length=1200):
-    # for inference, the generation prompt should be added.
-    add_generation_prompt = (process_mode != "train")
-    text = processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=add_generation_prompt)
 
-    # vision input
+def _sample_scalar(value, fallback):
+    if value is None:
+        return fallback
+    if isinstance(value, torch.Tensor):
+        return value.item() if value.numel() == 1 else fallback
+    if isinstance(value, (int, str)):
+        return value
+    return fallback
+
+
+def v2_sample_identity(data: dict, sample_index: int) -> str:
+    episode = _sample_scalar(data.get("episode_index"), "unknown")
+    frame = _sample_scalar(
+        data.get("frame_index", data.get("index")), "unknown"
+    )
+    return f"episode={episode} frame={frame} sample={sample_index}"
+
+def tokenize_vision_language_inputs(
+    msg,
+    process_mode,
+    processor,
+    max_length=1200,
+    *,
+    has_target=None,
+    dataset_entry="legacy",
+    sample_id="sample=unknown",
+    target=None,
+):
+    if has_target is None:
+        has_target = process_mode == "train"
     image_inputs, video_inputs = process_vision_info(msg, image_patch_size=16) # image_patch_size, 14 for Qwen2.5-VL and 16 for Qwen3-VL
-
-    st = time.time()
     if process_mode == "train":
         processor.tokenizer.padding_side = "right"
-        vl_inputs = processor(
-            text=[text],
-            images=image_inputs,
-            videos=video_inputs,
-            padding='max_length',
+        if has_target and target is None:
+            try:
+                target = extract_final_assistant_target(msg)
+            except DatasetIntegrityError as error:
+                raise DatasetIntegrityError(
+                    f"dataset_entry={dataset_entry} {sample_id}: {error}"
+                ) from error
+        return tokenize_chat_with_complete_assistant(
+            msg,
+            processor,
+            image_inputs=image_inputs,
+            video_inputs=video_inputs,
             max_length=max_length,
-            truncation=True,
-            do_resize=False,
-            return_tensors="pt",
-            padding_side="right"
+            dataset_entry=dataset_entry,
+            sample_id=sample_id,
+            target=target if has_target else None,
         )
-    else:
-        # don't perform padding during evaluation
-        vl_inputs = processor(
-            text=[text],
-            images=image_inputs,
-            videos=video_inputs,
-            padding=False,
-            truncation=True,
-            do_resize=False,
-            return_tensors="pt"
-        )
+
+    text = processor.apply_chat_template(
+        msg, tokenize=False, add_generation_prompt=not has_target
+    )
+    vl_inputs = processor(
+        text=[text],
+        images=image_inputs,
+        videos=video_inputs,
+        padding=False,
+        truncation=False,
+        do_resize=False,
+        return_tensors="pt",
+    )
     
     # remove the batch dim of input_ids and attention_mask
     vl_inputs["input_ids"] = vl_inputs["input_ids"][0] # (seq_len,)
@@ -147,17 +218,6 @@ def tokenize_vision_language_inputs(msg, process_mode, processor, max_length=120
     vl_inputs["pixel_values"] = vl_inputs["pixel_values"] # (pixel_values_width, pixel_values_height)
     vl_inputs["image_grid_thw"] = vl_inputs["image_grid_thw"] # (image_grid_thw_width, image_grid_thw_height)
 
-    if process_mode == "train":
-        vl_inputs["labels"] = vl_inputs["input_ids"].clone() # (seq_len,)
-
-        # mask prompt loss. 151643 is the default pad id of Qwen2.5
-        pad_id = getattr(processor.tokenizer, "pad_token_id", 151643)
-        masked_labels = mask_prompt_loss_1d(
-            vl_inputs["labels"],
-            assistant_start_ids=(151644, 77091, 198), # generation prompt: <|im_start|>assistant\n
-            pad_token_id=pad_id
-        )
-        vl_inputs["labels"] = masked_labels
     return vl_inputs
 
 def prepare_qwen_vl_inputs_cpu(
@@ -167,8 +227,14 @@ def prepare_qwen_vl_inputs_cpu(
     processor: AutoProcessor,
     process_mode: str,
     prompt_suffix: str,
-    fast_tokenizer: AutoProcessor
+    fast_tokenizer: AutoProcessor,
+    max_length: int = 1200,
+    requirements: ObjectiveRequirements | None = None,
+    target_text_field: str | None = None,
+    dataset_entry: str = "lerobot_v2",
+    sample_id: str = "sample=unknown",
 ):
+    identity = f"dataset_entry={dataset_entry} {sample_id}".strip()
     to_pil = ToPILImage()
     resized_height = 224
     resized_width = 224
@@ -188,8 +254,9 @@ def prepare_qwen_vl_inputs_cpu(
         for camera_key in camera_keys:
             context_images.append([camera_key, to_pil(data[camera_key])])
     else:
-        raise ValueError(
-            f"Expected image shape with 3 or 4 dimensions for data['{camera_keys[0]}'], "
+        raise DatasetIntegrityError(
+            f"{identity}: expected image shape with 3 or 4 dimensions for "
+            f"data['{camera_keys[0]}'], "
             f"but got shape with {len(data[camera_keys[0]].shape)} dimensions: {data[camera_keys[0]].shape}."
         )
 
@@ -198,31 +265,59 @@ def prepare_qwen_vl_inputs_cpu(
         prompt["content"].append({"type": "text", "text": cam_key})
         prompt["content"].append({"type": "image", "image": img, "resized_height": resized_height, "resized_width": resized_width})
 
-    prompt["content"].append({"type": "text", "text": "<TASK> " + data["task"].strip() + " <\TASK>\n" + prompt_suffix})
+    prompt["content"].append({"type": "text", "text": "<TASK> " + data["task"].strip() + " <\\TASK>\n" + prompt_suffix})
     msg = [prompt]
 
-    if process_mode == "train":
-        discrete_action_tokens = fast_tokenizer(data["norm_action_wo_pad"])
-        discrete_action_tokens_seq = convert_fast_tokens_to_vlm_action_seq(discrete_action_tokens[0])
+    has_target = process_mode == "train" if requirements is None else requirements.requires_target
+    output_seq = None
+    if has_target:
+        if target_text_field is not None:
+            output_seq = data.get(target_text_field)
+            if not isinstance(output_seq, str) or not output_seq.strip():
+                raise DatasetIntegrityError(
+                    f"{identity}: target_text_field {target_text_field!r} must "
+                    "contain a non-empty string"
+                )
+        else:
+            if fast_tokenizer is None:
+                raise DatasetIntegrityError(
+                    f"{identity}: legacy v2 target construction requires FAST tokenizer"
+                )
+            temporal_valid = data.get("action_temporal_valid")
+            if temporal_valid is None:
+                temporal_valid = _v2_action_temporal_valid(data, identity=identity)
+            discrete_action_tokens = fast_tokenizer(
+                data["norm_action_wo_pad"][temporal_valid]
+            )
+            discrete_action_tokens_seq = convert_fast_tokens_to_vlm_action_seq(discrete_action_tokens[0])
 
-        ecot_str = data["embodied_cot"] # load ECoT JSON string
-        ecot_json = json.loads(ecot_str)
-        if prompt_suffix == "":
-            # add discrete action tokens
-            ecot_json["Discrete Action Tokens"] = discrete_action_tokens_seq
-            # output seq is a complete embodied chain-of-thought reasoning path
-            output_seq = json.dumps(ecot_json, indent=2, ensure_ascii=False)
-            # output_seq = "<place holder>"
-        elif prompt_suffix == "Sub task:":
-            # output seq is a sub task
-            if "To-do Actions" in ecot_json:
-                output_seq = "<SUB_TASK>" + ecot_json["To-do Actions"][0] + "</SUB_TASK>"
-            else:
-                output_seq = "<SUB_TASK>done</SUB_TASK>"
-        
+            ecot_str = data["embodied_cot"]
+            try:
+                ecot_json = json.loads(ecot_str)
+            except (TypeError, json.JSONDecodeError) as error:
+                raise DatasetIntegrityError(
+                    f"{identity}: embodied_cot must be valid JSON"
+                ) from error
+            if prompt_suffix == "":
+                ecot_json["Discrete Action Tokens"] = discrete_action_tokens_seq
+                output_seq = json.dumps(ecot_json, indent=2, ensure_ascii=False)
+            elif prompt_suffix == "Sub task:":
+                if "To-do Actions" in ecot_json:
+                    output_seq = "<SUB_TASK>" + ecot_json["To-do Actions"][0] + "</SUB_TASK>"
+                else:
+                    output_seq = "<SUB_TASK>done</SUB_TASK>"
         msg.append({"role": "assistant", "content": output_seq})
     
-    vl_inputs = tokenize_vision_language_inputs(msg, process_mode, processor)
+    vl_inputs = tokenize_vision_language_inputs(
+        msg,
+        process_mode,
+        processor,
+        max_length=max_length,
+        has_target=has_target,
+        dataset_entry=dataset_entry,
+        sample_id=sample_id,
+        target=output_seq,
+    )
     
     return vl_inputs
 
@@ -247,7 +342,11 @@ class StreamingLeRobotSampleDataset(torch.utils.data.Dataset):
         process_mode: str,
         dataset_id: int,
         max_pad_state_and_action_length: int,
-        dataset_entry: str
+        dataset_entry: str,
+        max_length: int = 1200,
+        requirements: ObjectiveRequirements | None = None,
+        target_text_field: str | None = None,
+        max_transient_retries: int = 2,
     ):
         self.ds = lerobot_dataset
         self.use_quantile = use_quantile
@@ -260,16 +359,48 @@ class StreamingLeRobotSampleDataset(torch.utils.data.Dataset):
         self.dataset_id = dataset_id
         self.max_pad_state_and_action_length = max_pad_state_and_action_length
         self.dataset_entry = dataset_entry
+        self.max_length = max_length
+        self.requirements = requirements or resolve_objective_requirements(
+            "vlm_and_action",
+            adapter="lerobot_v2",
+            target_text_field=target_text_field,
+        )
+        self.target_text_field = target_text_field
+        self.max_transient_retries = max_transient_retries
 
         self.fps = self.ds.meta.fps
         self.camera_keys = self.ds.meta.camera_keys
-        self.stats = self.ds.meta.stats
-        self.grounding_camera_keys = self.ds.meta.grounding_camera_keys
+        self.stats = self.ds.meta.stats if self.requirements.requires_stats else None
+        self.grounding_camera_keys = tuple(self.ds.meta.grounding_camera_keys or ())
+
+        self.data_source = self.ds
+        if not self.requirements.requires_action:
+            required_columns = {
+                "episode_index",
+                "task_index",
+                "timestamp",
+                "index",
+                *self.camera_keys,
+            }
+            if self.requirements.requires_target and self.target_text_field:
+                required_columns.add(self.target_text_field)
+            available_columns = set(self.ds.hf_dataset.column_names)
+            projection = sorted(required_columns & available_columns)
+            missing = required_columns - set(projection) - set(self.ds.meta.video_keys)
+            if missing:
+                raise ValueError(
+                    f"{dataset_entry}: required AR-only columns are missing: {sorted(missing)}"
+                )
+            self.data_source = copy.copy(self.ds)
+            self.data_source.hf_dataset = self.ds.hf_dataset.select_columns(projection)
 
         self._epoch = 0  # used for deterministic randomness
         self._init_sampled_indices()
 
-        self.ecot_supported = self.is_ecot_enhanced(self.ds.hf_dataset)
+        self.ecot_supported = (
+            self.requirements.requires_fast_tokenizer
+            and self.is_ecot_enhanced(self.ds.hf_dataset)
+        )
         if self.ecot_supported:
             print(f"{dataset_entry} is ECoT-enhanced.")
         else:
@@ -323,55 +454,81 @@ class StreamingLeRobotSampleDataset(torch.utils.data.Dataset):
             for camera_key in self.camera_keys:
                 delta_timestamps[camera_key] = [index / self.fps for index in slide_window_observation_delta_indices]
 
-        # set action's delta timestamps
-        action_delta_indices = list(range(self.action_horizon))
-        delta_timestamps["action"] = [idx / self.fps for idx in action_delta_indices]
+        if self.requirements.requires_action:
+            action_delta_indices = list(range(self.action_horizon))
+            delta_timestamps["action"] = [idx / self.fps for idx in action_delta_indices]
         return delta_timestamps
 
-    def __getitem__(self, idx: int):
-        orig_idx = self.subset_indices[idx]
-        tries = 0
-        max_tries = 30
-        while tries < max_tries:
-            try:
-                idx = orig_idx if tries == 0 else random.choice(self.subset_indices)
-                # sample a `n_action_steps` value for current data (epoch stable)
-                test_time_n_action_steps = deterministic_test_time_n_action_steps(
-                    self.action_horizon, ds_id=self.dataset_id, local_idx=idx, epoch=self._epoch
-                )
-                delta_timestamps = self._obtain_delta_timestamps(test_time_n_action_steps)
-                # fetch raw data from Lerobot Dataset
-                data_sample = self.ds.getitem_with_delta_timestamps(idx, delta_timestamps)
-    
-                # online pre-processing
-                action_expert_inputs = prepare_action_expert_inputs_cpu(
-                    data_sample, self.stats, self.max_pad_state_and_action_length, self.use_quantile
-                )
-                prompt_suffix = ""
-                sub_task_flag = 0
-                if self.ecot_supported and random.random() < 0.1:
-                    # If the dataset is ECoT-enhanced, randomly select 10% of the samples
-                    # to follow the Two-Stage inference strategy:
-                    # 1. VLM first generates sub-task description from the prompt.
-                    # 2. Action expert then conditions on (prompt + sub-task) to predict continuous actions.
-                    prompt_suffix = "Sub task:"
-                    sub_task_flag = 1
+    def _get_item_once(self, sample_index: int):
+        test_time_n_action_steps = deterministic_test_time_n_action_steps(
+            self.action_horizon,
+            ds_id=self.dataset_id,
+            local_idx=sample_index,
+            epoch=self._epoch,
+        )
+        delta_timestamps = self._obtain_delta_timestamps(test_time_n_action_steps)
+        data_sample = self.data_source.getitem_with_delta_timestamps(
+            sample_index, delta_timestamps
+        )
+        sample_id = v2_sample_identity(data_sample, sample_index)
 
-                vl_inputs = prepare_qwen_vl_inputs_cpu(
-                    data=data_sample,
-                    camera_keys=self.camera_keys,
-                    grounding_camera_keys=self.grounding_camera_keys,
-                    processor=self.processor,
-                    process_mode=self.process_mode,
-                    prompt_suffix=prompt_suffix,
-                    fast_tokenizer=self.fast_tokenizer
-                )
-                preprocessed_data_sample = {**action_expert_inputs, **vl_inputs, "sub_task_flag": torch.tensor(sub_task_flag)}
-                return preprocessed_data_sample
-            except Exception as e:
-                tries += 1
-                # print(f"retry times: {tries}")
-        return None
+        try:
+            return self._preprocess_item(data_sample, sample_id)
+        except DatasetIntegrityError:
+            raise
+        except Exception as error:
+            if is_transient_io_error(error):
+                raise
+            raise DatasetIntegrityError(
+                f"dataset_entry={self.dataset_entry} {sample_id}: {error}"
+            ) from error
+
+    def _preprocess_item(self, data_sample: dict, sample_id: str):
+
+        action_expert_inputs = {}
+        if self.requirements.requires_state:
+            action_expert_inputs = prepare_action_expert_inputs_cpu(
+                data_sample,
+                self.stats,
+                self.max_pad_state_and_action_length,
+                self.use_quantile,
+                dataset_entry=self.dataset_entry,
+                sample_id=sample_id,
+            )
+        prompt_suffix = ""
+        sub_task_flag = 0
+        if self.ecot_supported and random.random() < 0.1:
+            prompt_suffix = "Sub task:"
+            sub_task_flag = 1
+
+        vl_inputs = prepare_qwen_vl_inputs_cpu(
+            data=data_sample,
+            camera_keys=self.camera_keys,
+            grounding_camera_keys=self.grounding_camera_keys,
+            processor=self.processor,
+            process_mode=self.process_mode,
+            prompt_suffix=prompt_suffix,
+            fast_tokenizer=self.fast_tokenizer,
+            max_length=self.max_length,
+            requirements=self.requirements,
+            target_text_field=self.target_text_field,
+            dataset_entry=self.dataset_entry,
+            sample_id=sample_id,
+        )
+        return {
+            **action_expert_inputs,
+            **vl_inputs,
+            "sub_task_flag": torch.tensor(sub_task_flag),
+        }
+
+    def __getitem__(self, idx: int):
+        sample_index = self.subset_indices[idx]
+        return run_with_same_sample_retries(
+            lambda: self._get_item_once(sample_index),
+            dataset_entry=self.dataset_entry,
+            sample_id=f"sample={sample_index}",
+            max_transient_retries=self.max_transient_retries,
+        )
 
 class HFDatasetWrapper:
     def __init__(self, path, split="train"):
@@ -404,12 +561,18 @@ class VQADataset(torch.utils.data.Dataset):
         process_mode: str = "train",
         max_pad_state_and_action_length: int = 64,
         action_horizon: int = 32,
+        max_length: int = 1200,
+        dataset_entry: str = "vqa_parquet",
+        max_transient_retries: int = 2,
     ):
         self.processor = processor
         self.process_mode = process_mode
         self.max_pad_state_and_action_length = max_pad_state_and_action_length
         self.action_horizon = action_horizon
         self.sample_ratio = sample_ratio
+        self.max_length = max_length
+        self.dataset_entry = dataset_entry
+        self.max_transient_retries = max_transient_retries
 
         # parquet dataset
         self.hf_ds = HFDatasetWrapper(f"{dataset_path}/data")
@@ -432,18 +595,21 @@ class VQADataset(torch.utils.data.Dataset):
 
     def generate_dummy_action_expert_inputs(self):
         return {
-            "observation.state": torch.randn(
+            "observation.state": torch.zeros(
                 1, self.max_pad_state_and_action_length
             ),
-            "state_mask": torch.ones(
-                1, self.max_pad_state_and_action_length
+            "state_mask": torch.zeros(
+                1, self.max_pad_state_and_action_length, dtype=torch.bool
             ),
-            "action": torch.randn(
+            "action": torch.zeros(
                 self.action_horizon, self.max_pad_state_and_action_length
             ),
             "action_mask": torch.zeros(
-                self.action_horizon, self.max_pad_state_and_action_length
+                self.action_horizon,
+                self.max_pad_state_and_action_length,
+                dtype=torch.bool,
             ),
+            "action_supervision_available": torch.tensor(False),
         }
 
     def _decode_image(self, img_bytes):
@@ -481,31 +647,38 @@ class VQADataset(torch.utils.data.Dataset):
             turn["content"] = new_content
         return msg
 
+    def _get_item_once(self, real_idx: int):
+        sample = self.hf_ds.get(real_idx)
+        image_bytes_dict = {
+            int(key[5:]): value
+            for key, value in sample.items()
+            if key.startswith("image") and value is not None
+        }
+        msg = orjson.loads(sample["json"]) if orjson is not None else json.loads(sample["json"])
+        msg = self._inject_images(msg, image_bytes_dict)
+        vl_inputs = tokenize_vision_language_inputs(
+            msg,
+            self.process_mode,
+            self.processor,
+            max_length=self.max_length,
+            dataset_entry=self.dataset_entry,
+            sample_id=f"sample={real_idx}",
+        )
+        action_expert_inputs = self.generate_dummy_action_expert_inputs()
+        return {
+            **action_expert_inputs,
+            **vl_inputs,
+            "sub_task_flag": torch.tensor(0),
+        }
+
     def __getitem__(self, idx: int):
-        try:
-            real_idx = self.subset_indices[idx]
-            sample = self.hf_ds.get(real_idx)
-
-            image_bytes_dict = {
-                int(key[5:]): val
-                for key, val in sample.items()
-                if key.startswith("image") and val is not None
-            }
-
-            # 1. parse JSON
-            msg = orjson.loads(sample["json"])
-            # 2. inject images
-            msg = self._inject_images(msg, image_bytes_dict)
-            # 3. tokenize / process
-            vl_inputs = tokenize_vision_language_inputs(msg, self.process_mode, self.processor)
-            # 4. dummy expert inputs
-            action_expert_inputs = self.generate_dummy_action_expert_inputs()
-
-            return {**action_expert_inputs, **vl_inputs, "sub_task_flag": torch.tensor(0)}
-
-        except Exception as e:
-            print("a VQA data point raises an error:", str(e))
-            return None
+        real_idx = self.subset_indices[idx]
+        return run_with_same_sample_retries(
+            lambda: self._get_item_once(real_idx),
+            dataset_entry=self.dataset_entry,
+            sample_id=f"sample={real_idx}",
+            max_transient_retries=self.max_transient_retries,
+        )
 
 def build_concat_streaming_dataset(
     dataset_entries: list[str],
@@ -515,34 +688,109 @@ def build_concat_streaming_dataset(
     action_horizon: int,
     accelerator,
     process_mode: str = "train",
-    max_pad_state_and_action_length: int = 64
+    max_pad_state_and_action_length: int = 64,
+    loss_type: str = "vlm_and_action",
+    max_length: int = 1200,
+    dataset_sample_ratios: list[float] | None = None,
 ):
+    if dataset_sample_ratios is not None and len(dataset_sample_ratios) != len(dataset_entries):
+        raise ValueError("dataset_sample_ratios must have the same length as dataset_entries")
+    selected_entries = []
+    needs_fast = False
+    for dataset_id, dataset_entry in enumerate(dataset_entries):
+        if dataset_entry not in DATASET2FEATURE:
+            raise ValueError(f"Unknown dataset entry {dataset_entry!r}")
+        entry = dict(DATASET2FEATURE[dataset_entry])
+        entry["dataset_entry"] = dataset_entry
+        if dataset_sample_ratios is not None:
+            entry["sample_ratio"] = dataset_sample_ratios[dataset_id]
+        sample_ratio = entry.get("sample_ratio")
+        if (
+            not isinstance(sample_ratio, (int, float))
+            or not math.isfinite(sample_ratio)
+            or not 0 < sample_ratio <= 1
+        ):
+            raise ValueError(
+                f"Dataset entry {dataset_entry!r} sample_ratio must be finite and in (0, 1]"
+            )
+        dataset_type = entry["dataset_type"]
+        adapter_name = None
+        if dataset_type == "vla":
+            adapter_name = resolve_dataset_adapter_name(entry)
+            if adapter_name == "lerobot_v3_future_difference" and window_size != 1:
+                raise ValueError(
+                    f"{dataset_entry}: v3 datasets require window_size=1"
+                )
+        elif dataset_type == "vlm":
+            adapter_name = "vqa_parquet"
+        requirements = resolve_objective_requirements(
+            loss_type,
+            adapter=adapter_name,
+            target_text_field=entry.get("target_text_field"),
+            dataset_type=dataset_type,
+            dataset_entry=dataset_entry,
+        )
+        needs_fast = needs_fast or requirements.requires_fast_tokenizer
+        selected_entries.append(
+            (dataset_id, dataset_entry, entry, adapter_name, requirements)
+        )
     processor = AutoProcessor.from_pretrained(model_name_or_path)
-    fast_tokenizer = AutoProcessor.from_pretrained(fast_tokenizer_path, trust_remote_code=True)
+    fast_tokenizer = (
+        AutoProcessor.from_pretrained(fast_tokenizer_path, trust_remote_code=True)
+        if needs_fast
+        else None
+    )
 
     datasets = []
-    for dataset_id, dataset_entry in enumerate(dataset_entries):
+    for dataset_id, dataset_entry, entry, adapter_name, requirements in selected_entries:
         print(f"loading {dataset_entry}")
-        dataset_path = DATASET2FEATURE[dataset_entry]["dataset_path"]
-        sample_ratio = DATASET2FEATURE[dataset_entry]["sample_ratio"]
-        dataset_type = DATASET2FEATURE[dataset_entry]["dataset_type"]
+        dataset_path = entry["dataset_path"]
+        sample_ratio = entry["sample_ratio"]
+        dataset_type = entry["dataset_type"]
 
         if dataset_type == "vla":
-            lerobot_dataset = LeRobotDataset(repo_id=dataset_path.split("/")[-1], root=dataset_path)
-            use_quantile = DATASET2FEATURE[dataset_entry]["use_quantile"]
-            ds = StreamingLeRobotSampleDataset(
-                lerobot_dataset=lerobot_dataset,
-                use_quantile=use_quantile,
-                sample_ratio=sample_ratio,
-                processor=processor,
-                fast_tokenizer=fast_tokenizer,
-                window_size=window_size,
-                action_horizon=action_horizon,
-                process_mode=process_mode,
-                dataset_id=dataset_id,
-                max_pad_state_and_action_length=max_pad_state_and_action_length,
-                dataset_entry=dataset_entry
-            )
+            if adapter_name == "lerobot_v2":
+                lerobot_dataset = LeRobotDataset(
+                    repo_id=dataset_path.split("/")[-1],
+                    root=dataset_path,
+                    load_stats=requirements.requires_stats,
+                )
+                ds = StreamingLeRobotSampleDataset(
+                    lerobot_dataset=lerobot_dataset,
+                    use_quantile=entry["use_quantile"],
+                    sample_ratio=sample_ratio,
+                    processor=processor,
+                    fast_tokenizer=fast_tokenizer,
+                    window_size=window_size,
+                    action_horizon=action_horizon,
+                    process_mode=process_mode,
+                    dataset_id=dataset_id,
+                    max_pad_state_and_action_length=max_pad_state_and_action_length,
+                    dataset_entry=dataset_entry,
+                    max_length=max_length,
+                    requirements=requirements,
+                    target_text_field=entry.get("target_text_field"),
+                    max_transient_retries=entry.get("max_transient_retries", 2),
+                )
+                ds.spec = resolve_dataset_spec(
+                    dataset_entry,
+                    entry,
+                    action_horizon=action_horizon,
+                    window_size=window_size,
+                    requirements=requirements,
+                    v2_metadata=lerobot_dataset.meta,
+                )
+            else:
+                adapter_factory = DATASET_ADAPTERS[adapter_name]
+                ds = adapter_factory(
+                    entry=entry,
+                    processor=processor,
+                    loss_type=loss_type,
+                    max_length=max_length,
+                    action_horizon=action_horizon,
+                    max_pad_state_and_action_length=max_pad_state_and_action_length,
+                    dataset_id=dataset_id,
+                )
         elif dataset_type == "vlm":
             ds = VQADataset(
                 dataset_path=dataset_path,
@@ -551,6 +799,32 @@ def build_concat_streaming_dataset(
                 process_mode=process_mode,
                 max_pad_state_and_action_length=max_pad_state_and_action_length,
                 action_horizon=action_horizon,
+                max_length=max_length,
+                dataset_entry=dataset_entry,
+                max_transient_retries=entry.get("max_transient_retries", 2),
+            )
+            ds.requirements = requirements
+            ds.spec = ResolvedDatasetSpec(
+                dataset_entry=dataset_entry,
+                dataset_path=str(Path(dataset_path).expanduser().resolve()),
+                dataset_type="vlm",
+                adapter="vqa_parquet",
+                target_text_field="json",
+                camera_keys=(),
+                grounding_camera_keys=(),
+                state_key="",
+                action_key="",
+                state_dim=0,
+                action_dim=0,
+                action_horizon=action_horizon,
+                stats_path=None,
+                stats_key=None,
+                normalization="none",
+                normalization_stats=None,
+                sample_ratio=float(sample_ratio),
+                training_eligibility_exists=False,
+                training_eligibility_used=False,
+                data_version=None,
             )
         else:
             raise ValueError(
@@ -563,6 +837,9 @@ def build_concat_streaming_dataset(
         datasets.append(ds)
 
     concat = ConcatDataset(datasets)
+    concat.resolved_dataset_manifest = build_resolved_dataset_manifest(
+        [dataset.spec for dataset in datasets], loss_type
+    )
     return concat
 
 def custom_collate_fn(batch):
@@ -570,15 +847,46 @@ def custom_collate_fn(batch):
     Generic collate_fn that stacks all keys except for certain keys,
     for which it uses cat along the first dimension.
     """
-    batch = [item for item in batch if item is not None]
-    if len(batch) == 0:
-        return None
+    if not batch:
+        raise DatasetIntegrityError("custom_collate_fn received an empty batch")
+    none_indices = [index for index, item in enumerate(batch) if item is None]
+    if none_indices:
+        raise DatasetIntegrityError(
+            f"custom_collate_fn received None sample at batch index {none_indices[0]}"
+        )
 
-    cat_keys = ['pixel_values', 'image_grid_thw']
-    keys = batch[0].keys()
+    cat_keys = {'pixel_values', 'image_grid_thw'}
+    token_stat_keys = set(TOKENIZATION_METRIC_SCHEMA)
+    token_validity_keys = {
+        token_metric_validity_key(key) for key in TOKENIZATION_METRIC_SCHEMA
+    }
+    common_keys = set.intersection(*(set(item) for item in batch))
+    common_keys -= token_stat_keys | token_validity_keys
+    keys = common_keys | token_stat_keys
+    if any('labels' in item for item in batch):
+        keys.add('labels')
     result = {}
     for key in keys:
-        items = [item[key] for item in batch]
+        if key == 'labels':
+            items = [
+                item.get('labels', torch.full_like(item['input_ids'], -100))
+                for item in batch
+            ]
+        elif key in token_stat_keys:
+            spec = TOKENIZATION_METRIC_SCHEMA[key]
+            exemplar = next(
+                (item[key] for item in batch if key in item),
+                torch.tensor(False if spec.dtype == torch.bool else 0, dtype=spec.dtype),
+            )
+            items = [item.get(key, torch.zeros_like(exemplar)) for item in batch]
+            validity_key = token_metric_validity_key(key)
+            validity = [
+                item.get(validity_key, torch.tensor(key in item, dtype=torch.bool))
+                for item in batch
+            ]
+            result[validity_key] = torch.stack(validity, dim=0).to(torch.bool)
+        else:
+            items = [item[key] for item in batch]
         if key in cat_keys:
             result[key] = torch.cat(items, dim=0)
         else:
@@ -591,19 +899,151 @@ def custom_collate_fn(batch):
         for key in ['input_ids', 'attention_mask', 'labels']:
             if key in result:
                 result[key] = result[key][:, :max_len].contiguous()
+        result['padding_token_count'] = (
+            result['attention_mask'].shape[1]
+            - result['attention_mask'].to(torch.long).sum(dim=1)
+        )
+        result[token_metric_validity_key('padding_token_count')] = torch.ones(
+            result['attention_mask'].shape[0], dtype=torch.bool
+        )
 
     return result
+
+
+class EpochGroupedSampler(Sampler[int]):
+    """Deterministically shuffle sample units while keeping declared groups intact."""
+
+    def __init__(self, concat_dataset: ConcatDataset, seed: int = 42):
+        self.concat_dataset = concat_dataset
+        self.seed = int(seed)
+        self.epoch = 0
+        self._units = []
+        offset = 0
+        for dataset in concat_dataset.datasets:
+            group_builder = getattr(dataset, "sampling_groups", None)
+            local_groups = (
+                group_builder()
+                if callable(group_builder)
+                else [[index] for index in range(len(dataset))]
+            )
+            flattened = [index for group in local_groups for index in group]
+            if sorted(flattened) != list(range(len(dataset))):
+                raise ValueError(
+                    "sampling_groups must cover every local dataset index exactly once"
+                )
+            for group in local_groups:
+                if not group:
+                    raise ValueError("sampling_groups must not contain empty groups")
+                global_group = tuple(offset + index for index in group)
+                self._units.append(
+                    global_group[0] if len(global_group) == 1 else global_group
+                )
+            offset += len(dataset)
+        if offset != len(concat_dataset):
+            raise ValueError("sampler length does not match concatenated dataset")
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + self.epoch)
+        for unit_index in torch.randperm(len(self._units), generator=generator).tolist():
+            unit = self._units[unit_index]
+            if isinstance(unit, tuple):
+                yield from unit
+            else:
+                yield unit
+
+    def __len__(self) -> int:
+        return len(self.concat_dataset)
+
+
+class EpochGroupedDistributedBatchSampler(Sampler[list[int]]):
+    """Shard one padded epoch across ranks before forming local micro-batches."""
+
+    def __init__(
+        self,
+        concat_dataset: ConcatDataset,
+        batch_size_per_device: int,
+        num_processes: int,
+        seed: int = 42,
+    ):
+        if batch_size_per_device < 1:
+            raise ValueError("batch_size_per_device must be positive")
+        if num_processes < 1:
+            raise ValueError("num_processes must be positive")
+        self.sampler = EpochGroupedSampler(concat_dataset, seed=seed)
+        self.batch_size = int(batch_size_per_device)
+        self.num_processes = int(num_processes)
+        self.drop_last = False
+
+    def set_epoch(self, epoch: int) -> None:
+        self.sampler.set_epoch(epoch)
+
+    @property
+    def samples_per_process(self) -> int:
+        return math.ceil(len(self.sampler) / self.num_processes)
+
+    @property
+    def batches_per_process(self) -> int:
+        return math.ceil(self.samples_per_process / self.batch_size)
+
+    def __iter__(self):
+        indices = list(self.sampler)
+        padding_size = self.samples_per_process * self.num_processes - len(indices)
+        if padding_size:
+            indices.extend(indices[:padding_size])
+
+        process_indices = [
+            indices[process_index :: self.num_processes]
+            for process_index in range(self.num_processes)
+        ]
+        for batch_index in range(self.batches_per_process):
+            start = batch_index * self.batch_size
+            stop = start + self.batch_size
+            for process_index in range(self.num_processes):
+                yield process_indices[process_index][start:stop]
+
+    def __len__(self) -> int:
+        return self.num_processes * self.batches_per_process
+
+
+def resolve_dataloader_num_workers(concat_dataset, requested: int | None) -> int:
+    if requested is not None:
+        if requested < 0:
+            raise ValueError("dataloader_num_workers must be non-negative")
+        return requested
+    has_grouped_dataset = any(
+        callable(getattr(dataset, "sampling_groups", None))
+        for dataset in concat_dataset.datasets
+    )
+    return 4 if has_grouped_dataset else 24
 
 def create_dataloader_for_concat(
     concat_dataset,
     batch_size_per_device: int,
+    num_processes: int = 1,
     num_workers: int = 8,
-    prefetch_factor: int = 2
+    prefetch_factor: int = 2,
+    seed: int = 42,
 ):
-    dataloader = DataLoader(
-        concat_dataset, batch_size=batch_size_per_device, shuffle=True, drop_last=False,
-        num_workers=num_workers, pin_memory=True, persistent_workers=False,
-        prefetch_factor=prefetch_factor, collate_fn=custom_collate_fn
+    batch_sampler = EpochGroupedDistributedBatchSampler(
+        concat_dataset,
+        batch_size_per_device=batch_size_per_device,
+        num_processes=num_processes,
+        seed=seed,
     )
+    kwargs = {
+        "dataset": concat_dataset,
+        "batch_sampler": batch_sampler,
+        "num_workers": num_workers,
+        "pin_memory": True,
+        "persistent_workers": False,
+        "collate_fn": custom_collate_fn,
+    }
+    if num_workers > 0:
+        kwargs["prefetch_factor"] = prefetch_factor
+    dataloader = DataLoader(**kwargs)
 
     return dataloader

@@ -16,6 +16,7 @@
 import torch
 import math
 import torch.nn.functional as F
+import torch.distributed as dist
 from torch import nn
 from torch.distributions import Beta
 from transformers import PretrainedConfig
@@ -23,6 +24,47 @@ from transformers.feature_extraction_utils import BatchFeature
 
 # from .cross_attention_dit import DiT
 from .cross_attention_dit import DiT
+
+
+def distributed_masked_mean(
+    elementwise_loss: torch.Tensor,
+    mask: torch.Tensor,
+    process_group=None,
+) -> torch.Tensor:
+    """Return the global valid-element mean with DDP-correct local gradients."""
+    if elementwise_loss.shape != mask.shape:
+        raise ValueError("elementwise_loss and mask must have identical shapes")
+    local_sum, local_count = masked_loss_sum_and_count(elementwise_loss, mask)
+
+    distributed = dist.is_available() and dist.is_initialized()
+    world_size = dist.get_world_size(process_group) if distributed else 1
+    global_count = local_count.clone()
+    global_sum = local_sum.detach().to(torch.float32).clone()
+    if distributed:
+        dist.all_reduce(global_count, op=dist.ReduceOp.SUM, group=process_group)
+        dist.all_reduce(global_sum, op=dist.ReduceOp.SUM, group=process_group)
+
+    has_valid = (global_count > 0).to(dtype=local_sum.dtype)
+    denominator = global_count.clamp_min(1.0).to(dtype=local_sum.dtype)
+    gradient_loss = local_sum * world_size / denominator
+    global_mean = (global_sum / global_count.clamp_min(1.0)).to(
+        dtype=local_sum.dtype
+    )
+    return (
+        gradient_loss + (global_mean - gradient_loss.detach())
+    ) * has_valid
+
+
+def masked_loss_sum_and_count(
+    elementwise_loss: torch.Tensor,
+    mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if elementwise_loss.shape != mask.shape:
+        raise ValueError("elementwise_loss and mask must have identical shapes")
+    mask = mask.to(device=elementwise_loss.device, dtype=torch.bool)
+    local_sum = (elementwise_loss.float() * mask.float()).sum()
+    local_count = mask.sum().detach().to(torch.float32)
+    return local_sum, local_count
 
 
 def swish(x):
@@ -475,12 +517,21 @@ class FlowmatchingActionHead(nn.Module):
 
         # Calculate loss only on unmasked dimensions (where action_mask==1)
         pred_velocity_masked = pred_velocity * M
-        denom = M.sum().clamp_min(1.0)
-        loss = F.mse_loss(pred_velocity_masked, velocity, reduction="sum") / denom
+        elementwise_loss = F.mse_loss(
+            pred_velocity_masked, velocity, reduction="none"
+        )
+        local_loss_sum, local_loss_count = masked_loss_sum_and_count(
+            elementwise_loss, action_mask
+        )
+        loss = distributed_masked_mean(elementwise_loss, action_mask)
         # loss = F.mse_loss(pred_velocity, velocity, reduction="none") * action_mask
         # loss = loss.sum() / action_mask.sum()
 
-        output_dict = {"action_expert_loss": loss}
+        output_dict = {
+            "action_expert_loss": loss,
+            "flow_matching_loss_sum": local_loss_sum,
+            "flow_matching_loss_count": local_loss_count,
+        }
         return BatchFeature(data=output_dict)
 
     def get_action(self, backbone_outputs: BatchFeature,

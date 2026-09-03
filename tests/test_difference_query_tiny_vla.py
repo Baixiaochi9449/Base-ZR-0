@@ -202,9 +202,11 @@ class TinyVlaDifferenceQueryTest(unittest.TestCase):
                 super().__init__()
                 self.wrapped = wrapped
                 self.calls = 0
+                self.sequence_lengths = []
 
             def forward(self, hidden_states):
                 self.calls += 1
+                self.sequence_lengths.append(hidden_states.shape[1])
                 return self.wrapped(hidden_states)
 
         counting_lm_head = CountingLMHead(backbone.model.lm_head)
@@ -215,6 +217,7 @@ class TinyVlaDifferenceQueryTest(unittest.TestCase):
         model.backbone = backbone
         model.action_expert = action_head
         model.action_expert_config = action_head.config
+        model.loss_type = "action"
         model.use_difference_query = False
         model.num_difference_queries = None
         model.detach_vlm_outputs_for_action_expert = False
@@ -224,7 +227,7 @@ class TinyVlaDifferenceQueryTest(unittest.TestCase):
             "attention_mask": torch.tensor([[1, 1, 1, 1, 0]]),
             "sub_task_flag": torch.tensor([0]),
             "observation.state": torch.randn(1, 1, 4),
-            "state_mask": torch.ones(1, 4, dtype=torch.bool),
+            "state_mask": torch.ones(1, 1, 4, dtype=torch.bool),
         }
         train_batch = BatchFeature(
             {
@@ -239,10 +242,10 @@ class TinyVlaDifferenceQueryTest(unittest.TestCase):
         train_outputs = model(
             train_batch,
             training_progress=0.25,
-            dynamic_loss_type="action",
         )
         self.assertTrue(torch.isfinite(train_outputs.action_expert_loss))
         self.assertEqual(counting_lm_head.calls, 1)
+        self.assertEqual(counting_lm_head.sequence_lengths, [0])
 
         direct_batch = BatchFeature(
             {
@@ -285,6 +288,7 @@ class TinyVlaDifferenceQueryTest(unittest.TestCase):
         ).action_pred
         torch.testing.assert_close(actual_actions, reference_actions)
         self.assertEqual(counting_lm_head.calls, 4)
+        self.assertEqual(counting_lm_head.sequence_lengths, [0, 5, 0, 0])
 
 
 if __name__ == "__main__":

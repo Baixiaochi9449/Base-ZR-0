@@ -114,6 +114,18 @@ class DifferenceQuerySequenceTest(unittest.TestCase):
         torch.testing.assert_close(result.context_lengths, torch.tensor([2, 3]))
         torch.testing.assert_close(result.target_lengths, torch.tensor([2, 0]))
 
+    def test_hf_shift_scores_first_target_from_last_query_position(self):
+        result = build_difference_query_sequence(
+            self.input_ids[:1],
+            self.attention_mask[:1],
+            labels=self.labels[:1],
+            num_queries=2,
+            placeholder_token_id=0,
+        )
+        first_target = (result.labels[0] != -100).nonzero(as_tuple=False)[0, 0]
+        prediction_position = first_target - 1  # HF causal LM shifts logits left.
+        self.assertEqual(prediction_position.item(), result.query_positions[0, -1].item())
+
     def test_direct_inference_reorders_to_context_query_padding(self):
         result = build_difference_query_sequence(
             self.input_ids,
@@ -172,6 +184,18 @@ class DifferenceQuerySequenceTest(unittest.TestCase):
                 self.input_ids[:1],
                 bad_padding,
                 labels=self.labels[:1],
+                num_queries=2,
+                placeholder_token_id=0,
+            )
+
+    def test_supervised_target_region_cannot_have_unlabeled_valid_suffix(self):
+        labels = self.labels[:1].clone()
+        labels[0, 3] = -100
+        with self.assertRaisesRegex(ValueError, "assistant.*contiguous"):
+            build_difference_query_sequence(
+                self.input_ids[:1],
+                self.attention_mask[:1],
+                labels=labels,
                 num_queries=2,
                 placeholder_token_id=0,
             )

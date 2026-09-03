@@ -64,7 +64,6 @@ from lerobot.common.datasets.utils import (
     load_episodes,
     load_episodes_stats,
     load_info,
-    load_stats,
     load_tasks,
     load_cots,
     load_future_sub_tasks,
@@ -79,6 +78,7 @@ from lerobot.common.datasets.utils import (
     BBOXES_PATH,
     COTS_PATH
 )
+from lerobot.common.datasets.utils import load_stats as load_dataset_stats
 from lerobot.common.datasets.video_utils import (
     VideoFrame,
     decode_video_frames,
@@ -110,10 +110,12 @@ class LeRobotDatasetMetadata:
         root: str | Path | None = None,
         revision: str | None = None,
         force_cache_sync: bool = False,
+        load_stats: bool = True,
     ):
         self.repo_id = repo_id
         self.revision = revision if revision else CODEBASE_VERSION
         self.root = Path(root) if root is not None else HF_LEROBOT_HOME / repo_id
+        self.load_stats_enabled = load_stats
 
         try:
             if force_cache_sync:
@@ -155,7 +157,7 @@ class LeRobotDatasetMetadata:
         #     self.episodes_stats = load_episodes_stats(self.root)
         #     self.stats = aggregate_stats(list(self.episodes_stats.values()))
 
-        self.stats = load_stats(self.root)
+        self.stats = load_dataset_stats(self.root) if self.load_stats_enabled else {}
         self.episodes_stats = {} # set to None because we use global statistics
 
     def pull_from_repo(
@@ -430,7 +432,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
         revision: str | None = None,
         force_cache_sync: bool = False,
         download_videos: bool = True,
-        video_backend: str | None = None
+        video_backend: str | None = None,
+        load_stats: bool = True,
     ):
         """
         2 modes are available for instantiating this class, depending on 2 different use cases:
@@ -552,7 +555,11 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
         # Load metadata
         self.meta = LeRobotDatasetMetadata(
-            self.repo_id, self.root, self.revision, force_cache_sync=force_cache_sync
+            self.repo_id,
+            self.root,
+            self.revision,
+            force_cache_sync=force_cache_sync,
+            load_stats=load_stats,
         )
         # if self.episodes is not None and self.meta._version >= packaging.version.parse("v2.1"):
         #     episodes_stats = [self.meta.episodes_stats[ep_idx] for ep_idx in self.episodes]

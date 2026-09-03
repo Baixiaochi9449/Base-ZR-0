@@ -26,8 +26,12 @@ class FakeRun:
     def __init__(self):
         self.logs = []
         self.finished = []
+        self.fail_log_calls = 0
 
     def log(self, metrics, step):
+        if self.fail_log_calls:
+            self.fail_log_calls -= 1
+            raise ConnectionError("temporary W&B outage")
         self.logs.append((metrics, step))
 
     def finish(self, exit_code=0):
@@ -115,6 +119,28 @@ class WandbTrainingLoggerTest(unittest.TestCase):
 
         self.assertEqual(fake_wandb.init_calls, [])
         self.assertEqual(accelerator.reduce_calls, [])
+
+    def test_post_init_logging_failure_is_buffered_and_retried(self):
+        accelerator = FakeAccelerator(is_main_process=True)
+        fake_wandb = FakeWandb()
+        logger = self.make_logger(accelerator, fake_wandb)
+        fake_wandb.run.fail_log_calls = 1
+
+        with self.assertLogs("utils.wandb_training_logger", level="WARNING"):
+            logger.log(
+                step=10,
+                mean_metrics={"train/loss": torch.tensor(2.0)},
+                scalar_metrics={},
+            )
+        self.assertEqual(len(logger._pending), 1)
+
+        logger.log(
+            step=20,
+            mean_metrics={"train/loss": torch.tensor(4.0)},
+            scalar_metrics={},
+        )
+        self.assertEqual(logger._pending, [])
+        self.assertEqual([step for _, step in fake_wandb.run.logs], [10, 20])
 
 
 if __name__ == "__main__":

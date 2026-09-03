@@ -322,8 +322,16 @@ class QwenVLBackbone(nn.Module):
             )
 
         use_cache = False if self.training else True
+        model_inputs = dict(vl_inputs)
+        if not compute_vlm_loss:
+            model_inputs.pop("labels", None)
+            model_inputs["logits_to_keep"] = torch.empty(
+                0,
+                dtype=torch.long,
+                device=model_inputs["input_ids"].device,
+            )
         model_outputs = self.model(
-            **vl_inputs,
+            **model_inputs,
             return_dict=True,
             output_hidden_states=True,
             use_cache=use_cache,
@@ -332,7 +340,11 @@ class QwenVLBackbone(nn.Module):
         # Transformers records Qwen3-VL decoder outputs before its final RMSNorm.
         raw_last_hidden_state = model_outputs["hidden_states"][-1]
         embeddings = _get_qwen_final_text_norm(self.model)(raw_last_hidden_state)
-        vlm_loss = model_outputs["loss"] if "labels" in vl_inputs else None
+        vlm_loss = (
+            model_outputs["loss"]
+            if compute_vlm_loss and "labels" in vl_inputs
+            else None
+        )
 
         # let the action expert only attend to the input (i.e., "image+text prompt" part) of the VLM,
         # including the generation prompt '<|im_start|>assistant\n'. Thus, during inference, we should set `add_generation_prompt` to True.
