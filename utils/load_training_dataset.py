@@ -781,7 +781,12 @@ def build_concat_streaming_dataset(
                     v2_metadata=lerobot_dataset.meta,
                 )
             else:
-                adapter_factory = DATASET_ADAPTERS[adapter_name]
+                if adapter_name == "stage05_mixed_pretraining":
+                    from utils.stage05_dataset import Stage05MixedPretrainingDataset
+
+                    adapter_factory = Stage05MixedPretrainingDataset
+                else:
+                    adapter_factory = DATASET_ADAPTERS[adapter_name]
                 ds = adapter_factory(
                     entry=entry,
                     processor=processor,
@@ -856,6 +861,7 @@ def custom_collate_fn(batch):
         )
 
     cat_keys = {'pixel_values', 'image_grid_thw'}
+    metadata_keys = {'task', 'train_data', 'slot_data', 'stats_key'}
     token_stat_keys = set(TOKENIZATION_METRIC_SCHEMA)
     token_validity_keys = {
         token_metric_validity_key(key) for key in TOKENIZATION_METRIC_SCHEMA
@@ -867,6 +873,9 @@ def custom_collate_fn(batch):
         keys.add('labels')
     result = {}
     for key in keys:
+        if key in metadata_keys:
+            result[key] = [item[key] for item in batch]
+            continue
         if key == 'labels':
             items = [
                 item.get('labels', torch.full_like(item['input_ids'], -100))
@@ -918,14 +927,37 @@ class EpochGroupedSampler(Sampler[int]):
         self.seed = int(seed)
         self.epoch = 0
         self._units = []
+        self._dataset_units = []
         offset = 0
         for dataset in concat_dataset.datasets:
+            dataset_units = []
+            range_builder = getattr(dataset, "sampling_group_ranges", None)
             group_builder = getattr(dataset, "sampling_groups", None)
-            local_groups = (
-                group_builder()
-                if callable(group_builder)
-                else [[index] for index in range(len(dataset))]
-            )
+            if callable(range_builder):
+                ranges = range_builder()
+                previous = 0
+                for start, stop in ranges:
+                    if start != previous or not start < stop or stop > len(dataset):
+                        raise ValueError(
+                            "sampling_group_ranges must exactly cover local indices in order"
+                        )
+                    unit = range(offset + start, offset + stop)
+                    unit = unit[0] if len(unit) == 1 else unit
+                    self._units.append(unit)
+                    dataset_units.append(unit)
+                    previous = stop
+                if previous != len(dataset):
+                    raise ValueError("sampling_group_ranges do not cover the dataset")
+                self._dataset_units.append(dataset_units)
+                offset += len(dataset)
+                continue
+            local_groups = group_builder() if callable(group_builder) else None
+            if local_groups is None:
+                dataset_units = list(range(offset, offset + len(dataset)))
+                self._units.extend(dataset_units)
+                self._dataset_units.append(dataset_units)
+                offset += len(dataset)
+                continue
             flattened = [index for group in local_groups for index in group]
             if sorted(flattened) != list(range(len(dataset))):
                 raise ValueError(
@@ -935,25 +967,93 @@ class EpochGroupedSampler(Sampler[int]):
                 if not group:
                     raise ValueError("sampling_groups must not contain empty groups")
                 global_group = tuple(offset + index for index in group)
-                self._units.append(
-                    global_group[0] if len(global_group) == 1 else global_group
-                )
+                unit = global_group[0] if len(global_group) == 1 else global_group
+                self._units.append(unit)
+                dataset_units.append(unit)
+            self._dataset_units.append(dataset_units)
             offset += len(dataset)
         if offset != len(concat_dataset):
             raise ValueError("sampler length does not match concatenated dataset")
+        block_sizes = [
+            getattr(dataset, "natural_mix_block_size", None)
+            for dataset in concat_dataset.datasets
+        ]
+        self.natural_mix_block_size = (
+            int(block_sizes[0])
+            if len(block_sizes) > 1
+            and block_sizes[0] is not None
+            and all(value == block_sizes[0] for value in block_sizes)
+            else None
+        )
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = int(epoch)
 
     def __iter__(self):
+        if self.natural_mix_block_size is not None:
+            yield from self._iter_natural_frame_mix()
+            return
         generator = torch.Generator()
         generator.manual_seed(self.seed + self.epoch)
         for unit_index in torch.randperm(len(self._units), generator=generator).tolist():
             unit = self._units[unit_index]
-            if isinstance(unit, tuple):
+            if isinstance(unit, (tuple, range)):
                 yield from unit
             else:
                 yield unit
+
+    @staticmethod
+    def _flatten_units(units, generator):
+        for unit_index in torch.randperm(len(units), generator=generator).tolist():
+            unit = units[unit_index]
+            if isinstance(unit, (tuple, range)):
+                yield from unit
+            else:
+                yield unit
+
+    def _iter_natural_frame_mix(self):
+        streams = []
+        remaining = []
+        for dataset_index, (dataset, units) in enumerate(
+            zip(self.concat_dataset.datasets, self._dataset_units)
+        ):
+            generator = torch.Generator()
+            generator.manual_seed(
+                self.seed + self.epoch * 1_000_003 + dataset_index * 10_007
+            )
+            streams.append(iter(self._flatten_units(units, generator)))
+            remaining.append(len(dataset))
+
+        schedule_generator = torch.Generator()
+        schedule_generator.manual_seed(self.seed + self.epoch * 1_000_003 + 97)
+        while (total_remaining := sum(remaining)) > 0:
+            block_size = min(self.natural_mix_block_size, total_remaining)
+            desired = [block_size * count / total_remaining for count in remaining]
+            allocation = [min(count, int(value)) for count, value in zip(remaining, desired)]
+            unassigned = block_size - sum(allocation)
+            priorities = sorted(
+                range(len(remaining)),
+                key=lambda index: (desired[index] - allocation[index], remaining[index], -index),
+                reverse=True,
+            )
+            for dataset_index in priorities:
+                if not unassigned:
+                    break
+                if allocation[dataset_index] < remaining[dataset_index]:
+                    allocation[dataset_index] += 1
+                    unassigned -= 1
+            if unassigned:
+                raise RuntimeError("natural frame mixer could not allocate a complete block")
+            schedule = torch.repeat_interleave(
+                torch.arange(len(allocation), dtype=torch.long),
+                torch.tensor(allocation, dtype=torch.long),
+            )
+            schedule = schedule[
+                torch.randperm(len(schedule), generator=schedule_generator)
+            ]
+            for dataset_index in schedule.tolist():
+                yield next(streams[dataset_index])
+                remaining[dataset_index] -= 1
 
     def __len__(self) -> int:
         return len(self.concat_dataset)
@@ -990,20 +1090,36 @@ class EpochGroupedDistributedBatchSampler(Sampler[list[int]]):
         return math.ceil(self.samples_per_process / self.batch_size)
 
     def __iter__(self):
-        indices = list(self.sampler)
-        padding_size = self.samples_per_process * self.num_processes - len(indices)
-        if padding_size:
-            indices.extend(indices[:padding_size])
+        padding_size = self.samples_per_process * self.num_processes - len(self.sampler)
+        first_indices = []
+        buffers = [[] for _ in range(self.num_processes)]
+        position = 0
 
-        process_indices = [
-            indices[process_index :: self.num_processes]
-            for process_index in range(self.num_processes)
-        ]
-        for batch_index in range(self.batches_per_process):
-            start = batch_index * self.batch_size
-            stop = start + self.batch_size
-            for process_index in range(self.num_processes):
-                yield process_indices[process_index][start:stop]
+        def consume(index):
+            nonlocal position
+            buffers[position % self.num_processes].append(index)
+            position += 1
+            if all(len(buffer) >= self.batch_size for buffer in buffers):
+                result = [buffer[: self.batch_size] for buffer in buffers]
+                for process_index in range(self.num_processes):
+                    del buffers[process_index][: self.batch_size]
+                return result
+            return None
+
+        for index in self.sampler:
+            if len(first_indices) < padding_size:
+                first_indices.append(index)
+            ready = consume(index)
+            if ready is not None:
+                yield from ready
+        for index in first_indices:
+            ready = consume(index)
+            if ready is not None:
+                yield from ready
+        if any(buffers):
+            if not all(len(buffer) == len(buffers[0]) for buffer in buffers):
+                raise RuntimeError("streaming distributed sampler produced uneven shards")
+            yield from buffers
 
     def __len__(self) -> int:
         return self.num_processes * self.batches_per_process
@@ -1016,6 +1132,7 @@ def resolve_dataloader_num_workers(concat_dataset, requested: int | None) -> int
         return requested
     has_grouped_dataset = any(
         callable(getattr(dataset, "sampling_groups", None))
+        or callable(getattr(dataset, "sampling_group_ranges", None))
         for dataset in concat_dataset.datasets
     )
     return 4 if has_grouped_dataset else 24

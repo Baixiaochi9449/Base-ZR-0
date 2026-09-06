@@ -15,7 +15,11 @@ import torch
 from utils.normalization import min_max_denorm
 
 
-SUPPORTED_DATASET_ADAPTERS = ("lerobot_v2", "lerobot_v3_future_difference")
+SUPPORTED_DATASET_ADAPTERS = (
+    "lerobot_v2",
+    "lerobot_v3_future_difference",
+    "stage05_mixed_pretraining",
+)
 SUPPORTED_LOSS_TYPES = ("action", "vlm", "vlm_and_action")
 
 
@@ -75,6 +79,10 @@ def resolve_objective_requirements(
         )
 
     needs_target = loss_type in {"vlm", "vlm_and_action"}
+    if adapter == "stage05_mixed_pretraining" and loss_type == "vlm_and_action":
+        # Joint eligibility is action-only. Text is optional per admitted sample
+        # and contributes AR supervision when present.
+        needs_target = False
     needs_action = loss_type in {"action", "vlm_and_action"}
     needs_fast = (
         adapter == "lerobot_v2" and needs_target and target_text_field is None
@@ -133,6 +141,8 @@ class ResolvedDatasetSpec:
         history_stride="not_applicable",
     )
     vision_input_contract: dict[str, Any] | None = None
+    sidecar_sha256: str | None = None
+    canonical_schema: dict[str, Any] | None = None
 
 
 def resolve_dataset_adapter_name(entry: dict[str, Any]) -> str:
@@ -349,6 +359,93 @@ def _resolve_v3_spec(
     )
 
 
+def _resolve_stage05_spec(
+    dataset_entry: str,
+    entry: dict[str, Any],
+    action_horizon: int,
+    window_size: int,
+    requirements: ObjectiveRequirements,
+) -> ResolvedDatasetSpec:
+    if window_size != 1 or not isinstance(action_horizon, int) or isinstance(action_horizon, bool) or action_horizon < 1:
+        raise ValueError(
+            f"{dataset_entry}: Stage05 mixed data requires window_size=1 and a positive action horizon"
+        )
+    root = Path(entry.get("dataset_path", "")).expanduser().resolve()
+    sidecar_field = "ar_sidecar_path" if not requirements.requires_action else "joint_sidecar_path"
+    sidecar = Path(entry.get(sidecar_field, entry.get("sidecar_path", ""))).expanduser().resolve()
+    try:
+        from utils.stage05_sidecar import load_stage05_sidecar, load_stage05_stats, sha256_file
+
+        sidecar_manifest = load_stage05_sidecar(sidecar, verify_source=False)
+    except Exception as error:
+        raise ValueError(f"{dataset_entry}: failed to resolve Stage05 sidecar: {error}") from error
+    if sidecar_manifest.get("dataset_root") != str(root):
+        raise ValueError(f"{dataset_entry}: Stage05 sidecar root mismatch")
+    camera_keys = tuple(entry.get("camera_keys", ()))
+    if len(camera_keys) != 2:
+        raise ValueError(f"{dataset_entry}: Stage05 camera_keys must be main then wrist")
+    forbidden = {"second_view", "observation.images.exterior_2_left"}
+    if forbidden.intersection(camera_keys):
+        raise ValueError(f"{dataset_entry}: second external view is forbidden")
+    stats = None
+    stats_sha256 = None
+    stats_path = None
+    configured_stats_key = entry.get("stats_key")
+    stats_key = str(configured_stats_key) if configured_stats_key is not None else None
+    if requirements.requires_stats and not stats_key:
+        raise ValueError(f"{dataset_entry}: Stage05 stats_key must be explicit")
+    if requirements.requires_stats:
+        stats_path = str(sidecar / "stats.json")
+        payload = load_stage05_stats(stats_path, expected_stats_key=stats_key)
+        stats = {
+            "observation.state": {
+                name: np.asarray(payload["statistics"]["state"][name], dtype=np.float32)
+                for name in ("q01", "q99")
+            },
+            "action": {
+                name: np.asarray(payload["statistics"]["actions"][name], dtype=np.float32)
+                for name in ("q01", "q99")
+            },
+        }
+        validate_v3_quantile_stats(
+            {"statistics": {"state": payload["statistics"]["state"], "actions": payload["statistics"]["actions"]}},
+            dataset_entry=dataset_entry,
+        )
+        stats_sha256 = sha256_file(Path(stats_path))
+    target_field = str(entry.get("target_text_field", "train_data"))
+    return ResolvedDatasetSpec(
+        dataset_entry=dataset_entry,
+        dataset_path=str(root),
+        dataset_type="vla",
+        adapter="stage05_mixed_pretraining",
+        target_text_field=target_field,
+        camera_keys=camera_keys,
+        grounding_camera_keys=(),
+        state_key="canonical.state",
+        action_key="canonical.action",
+        state_dim=7 if requirements.requires_state else 0,
+        action_dim=7 if requirements.requires_action else 0,
+        action_horizon=action_horizon,
+        stats_path=stats_path,
+        stats_key=stats_key,
+        normalization="quantile_min_max_q01_q99" if requirements.requires_stats else "none",
+        normalization_stats=stats,
+        sample_ratio=_sample_ratio(entry, dataset_entry),
+        training_eligibility_exists=True,
+        training_eligibility_used=True,
+        data_version=str(sidecar_manifest.get("source_codebase_version")),
+        task_key="trusted_episode_task",
+        stats_sha256=stats_sha256,
+        training_eligibility_source=str(sidecar / ("ar_indices.npy" if requirements.requires_target else "joint_indices.npy")),
+        observation_contract=ObservationContract(
+            version=1,
+            window_size=1,
+            history_order="single_current_frame",
+            history_stride="not_applicable",
+        ),
+        sidecar_sha256=str(sidecar_manifest["content_hash"]),
+        canonical_schema=sidecar_manifest.get("canonical_schema"),
+    )
 def _metadata_feature_dim(metadata: Any, key: str, fallback_stats_key: str) -> int:
     features = getattr(metadata, "features", None)
     if isinstance(features, dict) and key in features:
@@ -483,6 +580,10 @@ def resolve_dataset_spec(
         )
     if adapter == "lerobot_v3_future_difference":
         return _resolve_v3_spec(
+            dataset_entry, entry, action_horizon, window_size, requirements
+        )
+    if adapter == "stage05_mixed_pretraining":
+        return _resolve_stage05_spec(
             dataset_entry, entry, action_horizon, window_size, requirements
         )
     return _resolve_v2_spec(

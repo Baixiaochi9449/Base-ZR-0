@@ -2,6 +2,9 @@ import math
 import torch
 import numpy as np
 
+
+NORMALIZED_VALUE_CLIP = (-15.0, 15.0)
+
 def rotation_norm(end_effector_state):
     '''
     Converts Euler angles [r, p, y] in the end-effector state to their sine and cosine representations.
@@ -45,6 +48,25 @@ def rotation_denorm(norm_end_effector_state):
     end_effector_state = [x, y, z, r, p, y_] + norm_end_effector_state[9:]
     return end_effector_state
 
+def min_max_norm_unclipped(values, key_stats, use_quantile, eps=1e-8):
+    """Production quantile/min-max transform before the legacy safety clip."""
+    if not isinstance(values, torch.Tensor):
+        values = torch.tensor(values)
+
+    if values.ndim == 1:
+        values = values.unsqueeze(0)
+
+    if use_quantile:
+        min_values = torch.from_numpy(key_stats["q01"]).to(dtype=values.dtype, device=values.device)
+        max_values = torch.from_numpy(key_stats["q99"]).to(dtype=values.dtype, device=values.device)
+    else:
+        min_values = torch.from_numpy(key_stats["min"]).to(dtype=values.dtype, device=values.device)
+        max_values = torch.from_numpy(key_stats["max"]).to(dtype=values.dtype, device=values.device)
+
+    normed_0_1 = (values - min_values) / (max_values - min_values + eps)
+    return normed_0_1 * 2 - 1
+
+
 def min_max_norm(values, key_stats, use_quantile, eps=1e-8):
     """
     Per-dimension min-max normalization to [-1, 1].
@@ -58,24 +80,8 @@ def min_max_norm(values, key_stats, use_quantile, eps=1e-8):
     Returns:
         torch.Tensor: normalized tensor shape (N, L) or [1, L], values in [-1, 1]
     """
-    if not isinstance(values, torch.Tensor):
-        values = torch.tensor(values)
-    
-    if values.ndim == 1:
-        values = values.unsqueeze(0)
-    
-    if use_quantile:
-        min_values = torch.from_numpy(key_stats["q01"]).to(dtype=values.dtype, device=values.device)
-        max_values = torch.from_numpy(key_stats["q99"]).to(dtype=values.dtype, device=values.device)
-    else:
-        min_values = torch.from_numpy(key_stats["min"]).to(dtype=values.dtype, device=values.device)
-        max_values = torch.from_numpy(key_stats["max"]).to(dtype=values.dtype, device=values.device)
-    
-    normed_0_1 = (values - min_values) / (max_values - min_values + eps)
-    normed_minus1_1 = normed_0_1 * 2 - 1
-
-    normed_clipped = torch.clamp(normed_minus1_1, -15.0, 15.0)
-    return normed_clipped
+    normed = min_max_norm_unclipped(values, key_stats, use_quantile, eps=eps)
+    return torch.clamp(normed, *NORMALIZED_VALUE_CLIP)
 
 def min_max_denorm(values, key_stats, use_quantile=True, eps=1e-8):
     """

@@ -47,16 +47,10 @@ for name in \
     ZR0_WANDB_AR_RUN_NAME \
     ZR0_WANDB_AR_RUN_ID \
     ZR0_WANDB_JOINT_RUN_NAME \
-    ZR0_WANDB_JOINT_RUN_ID \
-    WANDB_API_KEY \
-    WANDB_ENTITY
+    ZR0_WANDB_JOINT_RUN_ID
 do
     require_env "$name"
 done
-if [[ -n "${WANDB_MODE:-}" && "$WANDB_MODE" != "online" ]]; then
-    echo "WANDB_MODE must be unset or 'online' for real smoke" >&2
-    exit 1
-fi
 
 read -r -a dataset_entries <<< "$ZR0_DATASET_ENTRIES"
 read -r -a dataset_sample_ratios <<< "$ZR0_DATASET_SAMPLE_RATIOS"
@@ -217,6 +211,7 @@ train_args=(
     --wandb_resume "$wandb_resume"
     --wandb_dir "$output_dir/wandb"
     --wandb_tags query-conditioned-ar future-difference smoke "$loss_type"
+    --wandb_failure_policy best_effort
 )
 
 if [[ "$loss_type" == "vlm_and_action" ]]; then

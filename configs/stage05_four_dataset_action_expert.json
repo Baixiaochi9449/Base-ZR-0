@@ -1,0 +1,32 @@
+{
+  "add_pos_embed": true,
+  "vlm_output_embedding_dim": 2048,
+  "action_or_state_token_embedding_dim": 2048,
+  "mlp_hidden_size": 512,
+  "max_seq_len": 256,
+  "action_dim": 64,
+  "state_dim": 64,
+  "action_horizon": 32,
+  "noise_beta_alpha": 1.5,
+  "noise_beta_beta": 1.0,
+  "noise_s": 0.999,
+  "num_timestep_buckets": 1000,
+  "diffusion_transformer_cfg": {
+    "num_attention_heads": 32,
+    "attention_head_dim": 64,
+    "output_dim": 1024,
+    "num_layers": 9,
+    "dropout": 0.2,
+    "attention_bias": true,
+    "activation_fn": "gelu-approximate",
+    "upcast_attention": false,
+    "norm_type": "ada_norm",
+    "norm_elementwise_affine": false,
+    "norm_eps": 1e-05,
+    "max_num_positional_embeddings": 128,
+    "positional_embeddings": null,
+    "final_dropout": true,
+    "interleave_self_attention": true,
+    "causal_mask_in_self_attn": false
+  }
+}

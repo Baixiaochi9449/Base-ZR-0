@@ -639,4 +639,5 @@ class LeRobotV3FutureDifferenceDataset(torch.utils.data.Dataset):
 DATASET_ADAPTERS = {
     "lerobot_v2": None,
     "lerobot_v3_future_difference": LeRobotV3FutureDifferenceDataset,
+    "stage05_mixed_pretraining": None,
 }

@@ -1,5 +1,6 @@
-import math
 import json
+import io
+import math
 import sys
 import tempfile
 import types
@@ -82,7 +83,12 @@ class _FakeActionExpert(nn.Module):
 
 class ModelLossContractTest(unittest.TestCase):
     def setUp(self):
-        self.config = FlowmatchingActionHeadConfig(action_dim=2, state_dim=2, action_horizon=3)
+        self.config = FlowmatchingActionHeadConfig(
+            action_dim=2,
+            state_dim=2,
+            action_horizon=3,
+            vlm_output_embedding_dim=4,
+        )
         self.patches = (
             patch("model.reasoning_vla_model.QwenVLBackbone", _FakeBackbone),
             patch("model.reasoning_vla_model.FlowmatchingActionHead", _FakeActionExpert),
@@ -426,19 +432,53 @@ class ModelLossContractTest(unittest.TestCase):
 
 
 class TrainInterfaceHelperTest(unittest.TestCase):
-    def test_action_config_reuses_checkpoint_architecture_and_overrides_io_shape(self):
+    def test_wandb_finish_timeout_diagnostics_are_written_to_local_jsonl(self):
+        class Writer:
+            def __init__(self):
+                self.scalars = []
+
+            def add_scalar(self, name, value, step):
+                self.scalars.append((name, value, step))
+
+        output = io.StringIO()
+        writer = Writer()
+        record = train_vla.write_wandb_finish_diagnostics(
+            output,
+            writer,
+            step=12,
+            diagnostics={
+                "wandb_finish_timed_out": 1,
+                "wandb_finish_timeout_seconds": 0.15,
+                "wandb_pending_payloads": 3,
+                "wandb_dropped_payloads": 4,
+                "wandb_consecutive_failures": 5,
+                "wandb_remote_abandoned": 1,
+            },
+        )
+        persisted = json.loads(output.getvalue())
+        self.assertEqual(persisted, record)
+        self.assertEqual(persisted["event"], "wandb_finish")
+        self.assertEqual(persisted["wandb_finish_timed_out"], 1)
+        self.assertIn(("wandb-finish-timed-out", 1, 12), writer.scalars)
+
+    def test_action_config_uses_explicit_architecture_without_default_overrides(self):
         source = FlowmatchingActionHeadConfig(
-            action_dim=8,
-            state_dim=8,
-            action_horizon=20,
+            action_dim=64,
+            state_dim=64,
+            action_horizon=16,
             noise_s=0.75,
         )
         with tempfile.TemporaryDirectory() as directory:
-            Path(directory, "action_expert_config.json").write_text(
+            config_path = Path(directory, "action_expert_config.json")
+            config_path.write_text(
                 json.dumps(source.to_dict()), encoding="utf-8"
+            )
+            Path(directory, "config.json").write_text(
+                json.dumps({"text_config": {"hidden_size": 2048}}), encoding="utf-8"
             )
             options = SimpleNamespace(
                 action_expert_name_or_path=None,
+                action_expert_config_path=str(config_path),
                 vlm_name_or_path=directory,
                 max_pad_state_and_action_length=64,
                 action_horizon=16,
@@ -448,6 +488,88 @@ class TrainInterfaceHelperTest(unittest.TestCase):
         self.assertEqual(resolved.state_dim, 64)
         self.assertEqual(resolved.action_horizon, 16)
         self.assertEqual(resolved.noise_s, 0.75)
+
+    def test_fresh_expert_warm_start_resolves_target_horizon_but_resume_is_strict(self):
+        source = FlowmatchingActionHeadConfig(
+            action_dim=64,
+            state_dim=64,
+            action_horizon=32,
+            noise_s=0.75,
+        )
+        reference = FlowmatchingActionHeadConfig(
+            action_dim=64,
+            state_dim=64,
+            action_horizon=10,
+            noise_s=0.75,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "checkpoint"
+            checkpoint.mkdir()
+            (checkpoint / "action_expert_config.json").write_text(
+                json.dumps(source.to_dict()), encoding="utf-8"
+            )
+            (checkpoint / "config.json").write_text(
+                json.dumps({"text_config": {"hidden_size": 2048}}), encoding="utf-8"
+            )
+            reference_path = root / "reference.json"
+            reference_path.write_text(
+                json.dumps(reference.to_dict()), encoding="utf-8"
+            )
+            options = SimpleNamespace(
+                action_expert_name_or_path=str(checkpoint),
+                action_expert_config_path=str(reference_path),
+                vlm_name_or_path=str(checkpoint),
+                max_pad_state_and_action_length=64,
+                action_horizon=10,
+                loss_type="action",
+                resume_training=False,
+            )
+
+            resolved = train_vla.resolve_action_expert_config(
+                options, return_resolved=True
+            )
+            self.assertEqual(resolved.source_action_horizon, 32)
+            self.assertEqual(resolved.config.action_horizon, 10)
+            self.assertTrue(resolved.action_horizon_overridden)
+
+            options.resume_training = True
+            with self.assertRaisesRegex(ValueError, "action_horizon mismatch"):
+                train_vla.resolve_action_expert_config(options)
+
+    def test_fresh_expert_warm_start_keeps_other_architecture_fields_strict(self):
+        source = FlowmatchingActionHeadConfig(
+            action_dim=64, state_dim=64, action_horizon=32, noise_s=0.75
+        )
+        reference = FlowmatchingActionHeadConfig(
+            action_dim=64, state_dim=64, action_horizon=10, noise_s=0.5
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "checkpoint"
+            checkpoint.mkdir()
+            (checkpoint / "action_expert_config.json").write_text(
+                json.dumps(source.to_dict()), encoding="utf-8"
+            )
+            (checkpoint / "config.json").write_text(
+                json.dumps({"text_config": {"hidden_size": 2048}}), encoding="utf-8"
+            )
+            reference_path = root / "reference.json"
+            reference_path.write_text(
+                json.dumps(reference.to_dict()), encoding="utf-8"
+            )
+            options = SimpleNamespace(
+                action_expert_name_or_path=str(checkpoint),
+                action_expert_config_path=str(reference_path),
+                vlm_name_or_path=str(checkpoint),
+                max_pad_state_and_action_length=64,
+                action_horizon=10,
+                loss_type="action",
+                resume_training=False,
+            )
+
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                train_vla.resolve_action_expert_config(options)
 
     def test_optimizer_uses_only_trainable_parameters_and_rejects_empty(self):
         model = nn.Sequential(nn.Linear(2, 2), nn.Linear(2, 2))
@@ -568,6 +690,21 @@ class TrainInterfaceHelperTest(unittest.TestCase):
             with self.subTest(action_horizon=value):
                 with self.assertRaisesRegex(SystemExit, "2"):
                     parse_train_options(["--action_horizon", value])
+
+    def test_downstream_checkpoint_purpose_requires_explicit_horizon(self):
+        with self.assertRaisesRegex(SystemExit, "2"):
+            parse_train_options(
+                ["--checkpoint_load_purpose", "downstream_finetune"]
+            )
+        options = parse_train_options(
+            [
+                "--checkpoint_load_purpose",
+                "downstream_finetune",
+                "--action_horizon=10",
+            ]
+        )
+        self.assertTrue(options.action_horizon_explicit)
+        self.assertEqual(options.action_horizon, 10)
 
     def test_train_cli_validates_loss_mode_and_weights(self):
         invalid = (

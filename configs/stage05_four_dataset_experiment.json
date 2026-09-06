@@ -1,0 +1,15 @@
+{
+  "experiment": "stage05_four_dataset_pretraining_20260904",
+  "schema_version": 1,
+  "token_audit_format_version": 2,
+  "required_max_length": 941,
+  "token_audit_report_content_hash": "852fa0fc20ab9bd6583eded888fb2d22aa3803274b36989f3150ad0f7b4a81cf",
+  "token_audit_report_file_sha256": "7b46995a1b2f1eec70202a972f1fe7266f0e523f6c94c8ab10c7db4a12e827a8",
+  "token_audit": {
+    "format_version": 2,
+    "required_max_length": 941,
+    "report_content_hash": "852fa0fc20ab9bd6583eded888fb2d22aa3803274b36989f3150ad0f7b4a81cf",
+    "report_file_sha256": "7b46995a1b2f1eec70202a972f1fe7266f0e523f6c94c8ab10c7db4a12e827a8",
+    "implementation_identity_sha256": "10180375e7a8e8980e0b43f67a5ac965badc6070531af33c66e639cce7c68660"
+  }
+}

@@ -55,7 +55,7 @@ required_variables=(
     EPOCHS MAX_TRAIN_STEPS SAVE_STEP_INTERVAL EXPECTED_GLOBAL_BATCH_SIZE
     NUM_GPUS PER_DEVICE_BATCH_SIZE GRADIENT_ACCUMULATION_STEPS
     DATASET_ENTRIES SAMPLE_RATIOS CUDA_VISIBLE_DEVICES
-    WANDB_API_KEY WANDB_ENTITY WANDB_PROJECT WANDB_GROUP WANDB_RUN_NAME WANDB_RUN_ID
+    WANDB_PROJECT WANDB_GROUP WANDB_RUN_NAME WANDB_RUN_ID
 )
 for name in "${required_variables[@]}"; do
     require_env "$name"
@@ -63,10 +63,6 @@ done
 for name in EPOCHS MAX_TRAIN_STEPS SAVE_STEP_INTERVAL EXPECTED_GLOBAL_BATCH_SIZE NUM_GPUS PER_DEVICE_BATCH_SIZE GRADIENT_ACCUMULATION_STEPS MAX_LENGTH; do
     require_positive_integer "$name"
 done
-if [[ -n "${WANDB_MODE:-}" && "$WANDB_MODE" != "online" ]]; then
-    echo "WANDB_MODE must be unset or 'online' for formal training" >&2
-    exit 1
-fi
 if [[ ! -f "$EXPERIMENT_DOC" ]]; then
     echo "EXPERIMENT_DOC does not exist: $EXPERIMENT_DOC" >&2
     exit 1
@@ -239,6 +235,7 @@ train_args=(
     --wandb_resume "$wandb_resume"
     --wandb_dir "$OUTPUT_DIR/wandb"
     --wandb_tags query-conditioned-ar future-difference "$stage"
+    --wandb_failure_policy best_effort
 )
 if [[ "$stage" == "joint" ]]; then
     train_args+=(--tune_action_expert)

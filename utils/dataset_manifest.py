@@ -39,6 +39,8 @@ DATASET_SEMANTIC_FIELDS = (
     "action_q01",
     "action_q99",
     "observation_contract",
+    "sidecar_sha256",
+    "canonical_schema",
 )
 
 
@@ -124,6 +126,8 @@ def dataset_spec_to_manifest(
             "history_stride": spec.observation_contract.history_stride,
         },
         "vision_input_contract": _jsonable(spec.vision_input_contract),
+        "sidecar_sha256": spec.sidecar_sha256,
+        "canonical_schema": _jsonable(spec.canonical_schema),
     }
 
 

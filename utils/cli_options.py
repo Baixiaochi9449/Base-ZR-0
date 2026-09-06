@@ -1,5 +1,6 @@
 import argparse
 import math
+import sys
 
 
 def _add_difference_query_options(parser: argparse.ArgumentParser) -> None:
@@ -37,6 +38,29 @@ def build_train_parser() -> argparse.ArgumentParser:
         help=(
             "path of the pretrained action expert. Unset means that we will use "
             "a randomly initialized action expert."
+        ),
+    )
+    parser.add_argument(
+        "--action_expert_config_path",
+        type=str,
+        help=(
+            "Explicit JSON architecture source for a randomly initialized Action "
+            "Expert, or a configuration to verify against loaded Expert weights."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint_load_purpose",
+        choices=(
+            "stage05_ar_resume",
+            "stage05_ar_to_joint",
+            "stage05_joint_resume",
+            "downstream_finetune",
+            "inference",
+        ),
+        default=None,
+        help=(
+            "Explicit checkpoint contract: Stage05 AR resume, AR-to-Joint, same-experiment "
+            "Joint resume, or a new downstream fine-tune initialization."
         ),
     )
     parser.add_argument(
@@ -108,6 +132,17 @@ def build_train_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wandb_dir", type=str, default="./outputs/wandb")
     parser.add_argument("--wandb_group", type=str)
     parser.add_argument("--wandb_tags", type=str, nargs="*")
+    parser.add_argument(
+        "--wandb_failure_policy",
+        choices=["best_effort", "required"],
+        default="best_effort",
+        help="Whether a W&B initialization failure may fall back to authoritative local logs.",
+    )
+    parser.add_argument("--wandb_pending_capacity", type=int, default=256)
+    parser.add_argument("--wandb_retry_base_steps", type=int, default=1)
+    parser.add_argument("--wandb_retry_max_steps", type=int, default=128)
+    parser.add_argument("--wandb_finish_max_attempts", type=int, default=2)
+    parser.add_argument("--wandb_finish_timeout_seconds", type=float, default=15.0)
     parser.add_argument(
         "--logging_steps",
         type=int,
@@ -267,7 +302,24 @@ def build_train_parser() -> argparse.ArgumentParser:
 
 def parse_train_options(args=None) -> argparse.Namespace:
     parser = build_train_parser()
-    options = parser.parse_args(args)
+    raw_args = list(sys.argv[1:] if args is None else args)
+    options = parser.parse_args(raw_args)
+    if options.checkpoint_load_purpose == "stage05_ar_resume" and (
+        not options.resume_training or options.loss_type != "vlm"
+    ):
+        parser.error("stage05_ar_resume requires --resume_training and --loss_type vlm")
+    options.action_horizon_explicit = any(
+        token == "--action_horizon" or token.startswith("--action_horizon=")
+        for token in raw_args
+    )
+    if (
+        options.checkpoint_load_purpose == "downstream_finetune"
+        and not options.action_horizon_explicit
+    ):
+        parser.error(
+            "--checkpoint_load_purpose downstream_finetune requires an explicit "
+            "--action_horizon for fresh initialization or resume"
+        )
     if options.max_train_steps is not None and options.max_train_steps < 1:
         parser.error("--max_train_steps must be at least 1")
     if options.per_device_train_batch_size < 1:
@@ -281,6 +333,21 @@ def parse_train_options(args=None) -> argparse.Namespace:
         parser.error("--expected_global_batch_size must be positive")
     if options.logging_steps < 1:
         parser.error("--logging_steps must be positive")
+    for name in (
+        "wandb_pending_capacity",
+        "wandb_retry_base_steps",
+        "wandb_retry_max_steps",
+        "wandb_finish_max_attempts",
+    ):
+        if getattr(options, name) < 1:
+            parser.error(f"--{name} must be positive")
+    if options.wandb_retry_max_steps < options.wandb_retry_base_steps:
+        parser.error("--wandb_retry_max_steps must be at least --wandb_retry_base_steps")
+    if (
+        not math.isfinite(options.wandb_finish_timeout_seconds)
+        or options.wandb_finish_timeout_seconds <= 0
+    ):
+        parser.error("--wandb_finish_timeout_seconds must be finite and positive")
     if options.loss_type not in {"vlm", "action", "vlm_and_action"}:
         parser.error("--loss_type must be one of [vlm, action, vlm_and_action]")
     if options.loss_type == "vlm":
@@ -346,6 +413,12 @@ def build_server_parser() -> argparse.ArgumentParser:
         help="the pre-registration dataset entry in dataset2feature.yaml",
     )
     parser.add_argument("--ckpt_dir", type=str, help="checkpoint directory")
+    parser.add_argument(
+        "--stats_key",
+        type=str,
+        default=None,
+        help="Required explicit per-dataset normalization key for Stage05 mixed checkpoints.",
+    )
     parser.add_argument(
         "--inference_mode",
         type=str,

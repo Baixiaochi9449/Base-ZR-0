@@ -18,6 +18,7 @@ def parse_args():
     parser.add_argument("--dataset-root", required=True)
     parser.add_argument("--annotation-root")
     parser.add_argument("--action-horizon", required=True, type=int)
+    parser.add_argument("--output", type=Path)
     return parser.parse_args()
 
 
@@ -28,7 +29,13 @@ def main():
         action_horizon=args.action_horizon,
         annotation_root=args.annotation_root,
     )
-    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    payload = json.dumps(report, ensure_ascii=False, sort_keys=True)
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        if args.output.exists():
+            raise FileExistsError(f"refusing to overwrite {args.output}")
+        args.output.write_text(payload + "\n", encoding="utf-8")
+    print(payload)
 
 
 if __name__ == "__main__":

@@ -53,10 +53,15 @@ def global_supervision_counts(
                 )
             local[1] += action_mask.to(dtype=torch.bool).sum().to(torch.float64)
     global_counts = accelerator.reduce(local, reduction="sum").detach()
-    if loss_type in AR_LOSS_TYPES and global_counts[0].item() <= 0:
+    if loss_type == "vlm" and global_counts[0].item() <= 0:
         raise ValueError("optimizer-step AR supervision count is zero")
-    if loss_type == "action" and global_counts[1].item() <= 0:
-        raise ValueError("action-only optimizer-step action supervision count is zero")
+    strict_joint_fm = any(
+        isinstance(batch.get("strict_joint_fm"), torch.Tensor)
+        and bool(batch["strict_joint_fm"].to(dtype=torch.bool).any())
+        for batch in batches
+    )
+    if (loss_type == "action" or strict_joint_fm) and global_counts[1].item() <= 0:
+        raise ValueError("optimizer-step action supervision count is zero")
     return GlobalSupervisionCounts(
         ar_tokens=global_counts[0],
         action_elements=global_counts[1],
@@ -79,7 +84,10 @@ def scaled_microbatch_loss(
         ar_sum = outputs.get("ar_loss_sum")
         if not isinstance(ar_sum, torch.Tensor):
             raise ValueError("model outputs must contain differentiable ar_loss_sum")
-        terms.append(vlm_loss_weight * ar_sum / counts.ar_tokens.to(ar_sum.dtype))
+        if counts.ar_tokens.item() > 0:
+            terms.append(vlm_loss_weight * ar_sum / counts.ar_tokens.to(ar_sum.dtype))
+        else:
+            terms.append(ar_sum * 0.0)
     if loss_type in FM_LOSS_TYPES:
         fm_sum = outputs.get("flow_matching_loss_sum")
         if not isinstance(fm_sum, torch.Tensor):

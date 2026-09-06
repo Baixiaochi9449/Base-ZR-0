@@ -17,6 +17,7 @@ from utils.dataset_spec import (
     resolve_objective_requirements,
 )
 from utils.dataset_adapters import prepare_future_difference_direct_inputs
+from utils.stage05_dataset import prepare_stage05_direct_inputs, STAGE05_CAMERA_LABELS
 from utils.dataset_manifest import validate_policy_dataset_manifest
 from policies.base_policy import BasePolicy
 
@@ -35,6 +36,7 @@ class ZR0Policy(BasePolicy):
         vlm_attention_backend=None,
         allow_legacy_checkpoint_without_manifest=False,
         allow_legacy_checkpoint_without_observation_contract=False,
+        stats_key=None,
     ):
         super().__init__()
         # env params
@@ -54,6 +56,12 @@ class ZR0Policy(BasePolicy):
         self.dataset_path = dataset_config["dataset_path"]
         adapter = resolve_dataset_adapter_name(dataset_config)
         self.dataset_adapter = adapter
+        if adapter == "stage05_mixed_pretraining":
+            configured_stats_key = dataset_config.get("stats_key")
+            if not stats_key or stats_key != configured_stats_key:
+                raise ValueError(
+                    f"{dataset_entry}: explicit stats_key must equal {configured_stats_key!r}"
+                )
         if (
             adapter == "lerobot_v3_future_difference"
             and inference_mode != "direct_action"
@@ -81,6 +89,7 @@ class ZR0Policy(BasePolicy):
         self.model = ZR0Model.from_pretrained(
             ckpt_dir,
             for_action_inference=True,
+            checkpoint_load_purpose="inference",
             use_difference_query=use_difference_query,
             num_difference_queries=num_difference_queries,
             vlm_attention_backend=vlm_attention_backend,
@@ -143,6 +152,20 @@ class ZR0Policy(BasePolicy):
         self.global_inference_steps = 0
 
     def _prepare_vl_inputs(self, data_sample: dict):
+        if self.dataset_adapter == "stage05_mixed_pretraining":
+            images = []
+            for label, camera_key in zip(STAGE05_CAMERA_LABELS, self.camera_keys):
+                value = data_sample.get(camera_key)
+                if value is None:
+                    if label == "wrist camera":
+                        continue
+                    raise ValueError(f"{self.dataset_entry}: main camera is required")
+                if value.ndim == 4:
+                    value = value[-1]
+                images.append((label, ToPILImage()(value)))
+            return prepare_stage05_direct_inputs(
+                task=data_sample["task"], images=images, processor=self.processor
+            )
         if self.dataset_adapter != "lerobot_v3_future_difference":
             return prepare_qwen_vl_inputs_cpu(
                 data=data_sample,
@@ -197,9 +220,11 @@ class ZR0Policy(BasePolicy):
 
         # convert image from numpy to tensor
         multi_view_images = dict()
-        for cam_key in self.camera_keys:
+        for camera_index, cam_key in enumerate(self.camera_keys):
             image = obs.get(cam_key)
             if image is None:
+                if self.dataset_adapter == "stage05_mixed_pretraining" and camera_index == 1:
+                    continue
                 raise ValueError(f"{self.dataset_entry}: observation is missing camera {cam_key!r}")
             multi_view_images[cam_key] = self.to_tensor(np.array(image, dtype=np.uint8))
 
@@ -207,7 +232,8 @@ class ZR0Policy(BasePolicy):
         self.ob_buffer.add_observation(multi_view_images)
         
         # get the latest observations from the buffer
-        observations = self.ob_buffer.get_inference_time_observations(self.camera_keys, visualize=True)
+        available_camera_keys = list(multi_view_images)
+        observations = self.ob_buffer.get_inference_time_observations(available_camera_keys, visualize=True)
 
         state = torch.as_tensor(state, dtype=torch.float32)
         if state.ndim == 1:

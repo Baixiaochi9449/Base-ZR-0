@@ -182,7 +182,9 @@ def _entry(root, ratio=1.0):
 def test_registry_default_and_unknown_error_lists_choices():
     from utils.dataset_adapters import DATASET_ADAPTERS, resolve_dataset_adapter_name
 
-    assert set(DATASET_ADAPTERS) == {"lerobot_v2", "lerobot_v3_future_difference"}
+    assert set(DATASET_ADAPTERS) == {
+        "lerobot_v2", "lerobot_v3_future_difference", "stage05_mixed_pretraining"
+    }
     assert resolve_dataset_adapter_name({"dataset_type": "vla"}) == "lerobot_v2"
     with pytest.raises(ValueError, match="lerobot_v2.*lerobot_v3_future_difference"):
         resolve_dataset_adapter_name({"dataset_type": "vla", "dataset_adapter": "bad"})

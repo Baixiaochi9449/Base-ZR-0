@@ -211,6 +211,31 @@ class QwenVLBackboneTest(unittest.TestCase):
                 expected = base_model.model.language_model.norm(raw)
                 torch.testing.assert_close(outputs.backbone_embeddings, expected)
 
+    def test_joint_sample_without_ar_tokens_returns_graph_connected_zero(self):
+        raw = torch.tensor(
+            [[[3.0, 4.0], [0.0, 2.0], [5.0, 1.0]]], requires_grad=True
+        )
+        model = FakeConditionalModel(raw)
+        backbone = self.make_backbone(model)
+        backbone.train()
+        inputs = BatchFeature(
+            {
+                "input_ids": torch.tensor([[1, 2, 3]]),
+                "attention_mask": torch.tensor([[1, 1, 1]]),
+                "labels": torch.full((1, 3), -100, dtype=torch.long),
+                "pixel_values": torch.ones(2, 3),
+                "image_grid_thw": torch.tensor([[1, 2, 2]]),
+                "sub_task_flag": torch.tensor([0]),
+            }
+        )
+
+        outputs = backbone(inputs, compute_vlm_loss=True)
+
+        self.assertNotIn("labels", model.forward_call)
+        self.assertEqual(outputs.vlm_loss.item(), 0.0)
+        outputs.vlm_loss.backward()
+        torch.testing.assert_close(raw.grad, torch.zeros_like(raw))
+
     def test_enabled_path_injects_queries_and_gathers_only_query_hidden_states(self):
         model = FakeConditionalModel(hidden_state=None)
         with torch.no_grad():

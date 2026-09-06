@@ -460,14 +460,18 @@ class QueryArJointFormalLauncherTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("config GAS must be integer 32", result.stderr)
 
-    def test_formal_training_rejects_disabled_wandb(self):
+    def test_formal_training_keeps_wandb_best_effort(self):
         env = self.environment()
         env["WANDB_MODE"] = "disabled"
 
         result = self.run_launcher("joint", env=env)
 
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("WANDB_MODE", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        tokens = shlex.split(result.stdout.strip())
+        self.assertIn("WANDB_MODE=online", tokens)
+        self.assertEqual(
+            tokens[tokens.index("--wandb_failure_policy") + 1], "best_effort"
+        )
 
     def test_dataset_entries_and_ratios_must_have_equal_length(self):
         env = self.environment()

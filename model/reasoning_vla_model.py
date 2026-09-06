@@ -9,17 +9,41 @@ from .difference_query import (
 )
 
 import torch
+import hashlib
 import json
 import os
 from safetensors.torch import save_file, load_file
 import math
 from pathlib import Path
 from utils.dataset_manifest import write_resolved_dataset_manifest
+from utils.stage05_checkpoint_contract import (
+    CHECKPOINT_LOAD_PURPOSES,
+    DOWNSTREAM_FINETUNE,
+    INFERENCE,
+    STAGE05_AR_RESUME,
+    STAGE05_AR_TO_JOINT,
+    STAGE05_JOINT_RESUME,
+    STAGE05_AR_JOINT_CONTRACT_KEY,
+    build_stage05_ar_joint_contract,
+    _checkpoint_has_stage05_identity,
+    is_stage05_four_dataset_manifest,
+    validate_checkpoint_load_purpose_arguments,
+    validate_generic_action_expert_contract,
+    validate_stage05_checkpoint_for_purpose,
+    validate_stage05_resume_artifacts,
+)
 
 
 _LOSS_TYPES = {"vlm", "action", "vlm_and_action"}
 CHECKPOINT_METADATA_NAME = "zr0_checkpoint_metadata.json"
 CHECKPOINT_METADATA_VERSION = 1
+
+
+def _canonical_json_hash(value) -> str:
+    payload = json.dumps(
+        value, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _checkpoint_kind_for_loss_type(loss_type: str) -> str:
@@ -63,11 +87,19 @@ class ZR0Model(nn.Module):
             num_difference_queries=None,
             vlm_attention_backend=None,
             loss_type="vlm_and_action",
+            checkpoint_load_purpose=None,
+            resume_training=False,
+            action_expert_config_path=None,
         ):
         super().__init__()
 
         if loss_type not in _LOSS_TYPES:
             raise ValueError(f"loss_type must be one of {sorted(_LOSS_TYPES)}")
+        validate_checkpoint_load_purpose_arguments(
+            checkpoint_load_purpose, resume_training=resume_training
+        )
+        if checkpoint_load_purpose == STAGE05_AR_RESUME and loss_type != "vlm":
+            raise ValueError("stage05_ar_resume requires loss_type=vlm")
         if loss_type == "vlm":
             if not tune_vlm:
                 raise ValueError("loss_type=vlm requires tune_vlm=True")
@@ -78,8 +110,103 @@ class ZR0Model(nn.Module):
                     "loss_type=vlm does not accept action_expert_name_or_path"
                 )
         self.loss_type = loss_type
+        self.checkpoint_load_purpose = checkpoint_load_purpose
         self.resolved_dataset_manifest = None
+        self.action_expert_source_action_horizon = int(
+            action_expert_config.action_horizon
+        )
         source_kind = _read_checkpoint_kind(vlm_name_or_path)
+
+        for checkpoint_source in dict.fromkeys(
+            source
+            for source in (vlm_name_or_path, action_expert_name_or_path)
+            if source
+        ):
+            checkpoint_path = Path(checkpoint_source)
+            if not checkpoint_path.is_dir():
+                continue
+            metadata_path = checkpoint_path / CHECKPOINT_METADATA_NAME
+            metadata_payload = {}
+            if metadata_path.is_file():
+                try:
+                    metadata_payload = json.loads(
+                        metadata_path.read_text(encoding="utf-8")
+                    )
+                except Exception as error:
+                    raise ValueError(
+                        f"failed to read checkpoint metadata {metadata_path}: {error}"
+                    ) from error
+            if _checkpoint_has_stage05_identity(
+                checkpoint_path.resolve(), metadata_payload
+            ) and checkpoint_load_purpose is None:
+                raise ValueError(
+                    "Stage05 checkpoint requires an explicit checkpoint_load_purpose"
+                )
+            if "action_expert_contract" in metadata_payload:
+                from utils.action_expert_config import read_vlm_hidden_size
+
+                allow_horizon_override = (
+                    not resume_training
+                    and bool(action_expert_name_or_path)
+                    and loss_type in {"action", "vlm_and_action"}
+                    and checkpoint_load_purpose in (None, DOWNSTREAM_FINETUNE)
+                )
+                verified = validate_generic_action_expert_contract(
+                    checkpoint_path,
+                    expected_action_dim=action_expert_config.action_dim,
+                    expected_state_dim=action_expert_config.state_dim,
+                    expected_vlm_hidden_size=read_vlm_hidden_size(vlm_name_or_path),
+                    **(
+                        {"action_horizon_override": action_expert_config.action_horizon}
+                        if allow_horizon_override else
+                        {"expected_action_horizon": action_expert_config.action_horizon}
+                    ),
+                )
+                if _canonical_json_hash(action_expert_config.to_dict()) != verified.parsed_sha256:
+                    raise ValueError("requested Action Expert config differs from the verified contract")
+                action_expert_config = verified.config
+                self.action_expert_source_action_horizon = verified.source_action_horizon
+
+        # Model construction is also a protected production boundary.  The
+        # launcher and train_vla perform the same check, but callers that use
+        # ZR0Model directly must not be able to allocate a model around an
+        # unverified checkpoint contract.
+        if checkpoint_load_purpose is not None:
+            purpose_source = (
+                action_expert_name_or_path
+                if checkpoint_load_purpose in {DOWNSTREAM_FINETUNE, INFERENCE}
+                and action_expert_name_or_path
+                else vlm_name_or_path
+            )
+            validator = (
+                validate_stage05_resume_artifacts
+                if checkpoint_load_purpose == STAGE05_JOINT_RESUME
+                else validate_stage05_checkpoint_for_purpose
+            )
+            validator_kwargs = {
+                "external_config_path": action_expert_config_path,
+                "requested_action_horizon": action_expert_config.action_horizon,
+                "expected_action_dim": int(action_expert_config.action_dim),
+                "expected_state_dim": int(action_expert_config.state_dim),
+                "expected_num_difference_queries": (
+                    num_difference_queries
+                    if num_difference_queries is not None
+                    else 32
+                ),
+            }
+            if validator is validate_stage05_checkpoint_for_purpose:
+                validator_kwargs.update(
+                    purpose=checkpoint_load_purpose,
+                    resume_training=resume_training,
+                )
+            validated_source = validator(purpose_source, **validator_kwargs)
+            self.action_expert_source_action_horizon = int(
+                validated_source.source_action_horizon
+            )
+            if checkpoint_load_purpose == STAGE05_AR_RESUME:
+                if _canonical_json_hash(action_expert_config.to_dict()) != validated_source.parsed_sha256:
+                    raise ValueError("Stage05 AR resume requested Expert config mismatch")
+                action_expert_config = validated_source.config
         if loss_type == "vlm" and source_kind not in (None, "ar_only"):
             raise ValueError(
                 f"checkpoint kind {source_kind!r} cannot be loaded for loss_type=vlm"
@@ -92,6 +219,15 @@ class ZR0Model(nn.Module):
             raise ValueError(
                 "joint warm start from an ar_only checkpoint must randomly initialize "
                 "the Action Expert and forbids action_expert_name_or_path"
+            )
+        if (
+            source_kind == "ar_only"
+            and loss_type == "vlm_and_action"
+            and checkpoint_load_purpose not in (None, STAGE05_AR_TO_JOINT)
+        ):
+            raise ValueError(
+                "an ar_only checkpoint requires checkpoint_load_purpose="
+                "'stage05_ar_to_joint' for Joint initialization"
             )
         if loss_type == "vlm_and_action" and source_kind == "joint":
             same_checkpoint = action_expert_name_or_path and (
@@ -120,11 +256,29 @@ class ZR0Model(nn.Module):
             or not isinstance(max_seq_len, int)
             or max_seq_len <= 0
         )
-        if invalid_horizon or invalid_max_seq_len or action_horizon > max_seq_len:
+        dit_config = getattr(action_expert_config, "diffusion_transformer_cfg", {})
+        max_position_embeddings = (
+            dit_config.get("max_num_positional_embeddings")
+            if isinstance(dit_config, dict)
+            else None
+        )
+        invalid_position_capacity = (
+            isinstance(max_position_embeddings, bool)
+            or not isinstance(max_position_embeddings, int)
+            or max_position_embeddings <= 0
+            or action_horizon + 1 > max_position_embeddings
+        )
+        if (
+            invalid_horizon
+            or invalid_max_seq_len
+            or action_horizon + 1 > max_seq_len
+            or invalid_position_capacity
+        ):
             raise ValueError(
-                "Action Expert action_horizon must be a positive integer no greater "
-                f"than max_seq_len; got action_horizon={action_horizon}, "
-                f"max_seq_len={max_seq_len}"
+                "Action Expert action_horizon must be a positive integer whose "
+                "state-plus-action sequence fits max_seq_len and positional capacity; "
+                f"got action_horizon={action_horizon}, max_seq_len={max_seq_len}, "
+                f"max_num_positional_embeddings={max_position_embeddings}"
             )
 
         difference_query_config = resolve_difference_query_config(
@@ -147,7 +301,13 @@ class ZR0Model(nn.Module):
             resolved_difference_query_config=difference_query_config,
         )
         print("the size of VLM's last layer hidden state:", self.backbone.model.config.text_config.hidden_size)
-        self.action_expert_config.vlm_output_embedding_dim = self.backbone.model.config.text_config.hidden_size
+        actual_vlm_hidden_size = self.backbone.model.config.text_config.hidden_size
+        if self.action_expert_config.vlm_output_embedding_dim != actual_vlm_hidden_size:
+            raise ValueError(
+                "Action Expert config hidden size does not match the VLM: "
+                f"{self.action_expert_config.vlm_output_embedding_dim} != "
+                f"{actual_vlm_hidden_size}"
+            )
         # self.action_expert_config.vlm_output_embedding_dim = self.backbone.model.config.hidden_size
         self.action_expert = None
         if loss_type != "vlm":
@@ -158,9 +318,26 @@ class ZR0Model(nn.Module):
         
         if action_expert_name_or_path:
             print(f"load pre-trained weights from {action_expert_name_or_path} to initialize the action expert")
-            self.action_expert.load_state_dict(
-                load_file(os.path.join(action_expert_name_or_path, "action_expert.safetensors"))
+            loaded_state = load_file(
+                os.path.join(action_expert_name_or_path, "action_expert.safetensors")
             )
+            expected_state = self.action_expert.state_dict()
+            if set(loaded_state) != set(expected_state):
+                raise ValueError(
+                    "Action Expert checkpoint state_dict keys do not match the "
+                    "validated runtime architecture"
+                )
+            shape_mismatches = [
+                name
+                for name in expected_state
+                if tuple(loaded_state[name].shape) != tuple(expected_state[name].shape)
+            ]
+            if shape_mismatches:
+                raise ValueError(
+                    "Action Expert checkpoint has incompatible parameter shapes: "
+                    + ", ".join(shape_mismatches[:5])
+                )
+            self.action_expert.load_state_dict(loaded_state, strict=True)
 
     def _require_action_expert(self) -> FlowmatchingActionHead:
         if self.action_expert is None:
@@ -349,8 +526,10 @@ class ZR0Model(nn.Module):
                 raise ValueError("labels are required for vlm and vlm_and_action training")
             if labels.shape != input_ids.shape:
                 raise ValueError("labels shape must match input_ids")
-            if not (labels != -100).any(dim=1).all():
-                raise ValueError("labels must contain supervision for each sample, not only -100")
+            if loss_type == "vlm" and not (labels != -100).any(dim=1).all():
+                raise ValueError(
+                    "AR-only labels must contain supervision in each sample, not only -100"
+                )
         if loss_type in ("action", "vlm_and_action"):
             required_keys = (
                 "observation.state",
@@ -390,6 +569,13 @@ class ZR0Model(nn.Module):
             action_supervision = action_supervision.to(
                 device=input_ids.device, dtype=torch.bool
             )
+            strict_joint_fm = batch_inputs.get("strict_joint_fm")
+            if strict_joint_fm is not None:
+                if not isinstance(strict_joint_fm, torch.Tensor) or strict_joint_fm.shape != (batch_size,):
+                    raise ValueError("strict_joint_fm must have shape [batch_size]")
+                strict_joint_fm = strict_joint_fm.to(device=input_ids.device, dtype=torch.bool)
+            else:
+                strict_joint_fm = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
             if loss_type == "action" and not action_supervision.all():
                 raise ValueError(
                     "action-only training does not accept samples without action supervision"
@@ -401,6 +587,10 @@ class ZR0Model(nn.Module):
             if (action_supervision & ~state_valid).any():
                 raise ValueError(
                     "VLA state_mask must contain a valid state for each sample with action supervision"
+                )
+            if (strict_joint_fm & (~action_supervision | ~action_valid)).any():
+                raise ValueError(
+                    "strict Joint samples require FM_count > 0 for every sample"
                 )
             if (action_supervision & ~action_valid).any():
                 raise ValueError(
@@ -587,9 +777,35 @@ class ZR0Model(nn.Module):
             save_file(self.action_expert.state_dict(), action_weight_path)
         elif os.path.exists(action_weight_path):
             os.unlink(action_weight_path)
-        # save action expert's config
-        with open(os.path.join(save_directory, "action_expert_config.json"), "w") as json_file:
-            json.dump(self.action_expert_config.to_dict(), json_file, indent=4)
+        # AR-only Stage05 checkpoints preserve the exact external config bytes so
+        # the future Joint initialization contract remains independently auditable.
+        resolved_action_config = json.loads(
+            json.dumps(self.action_expert_config.to_dict(), ensure_ascii=True)
+        )
+        action_config_path = os.path.join(save_directory, "action_expert_config.json")
+        is_stage05_ar = is_stage05_four_dataset_manifest(
+            self.resolved_dataset_manifest, expected_loss_type="vlm"
+        ) and self.loss_type == "vlm"
+        is_stage05_joint = is_stage05_four_dataset_manifest(
+            self.resolved_dataset_manifest, expected_loss_type="vlm_and_action"
+        ) and self.loss_type == "vlm_and_action"
+        if is_stage05_ar or is_stage05_joint:
+            source_bytes = getattr(self, "action_expert_config_source_bytes", None)
+            source_sha256 = getattr(
+                self, "action_expert_config_source_sha256", None
+            )
+            if not isinstance(source_bytes, bytes) or not isinstance(source_sha256, str):
+                raise ValueError(
+                    "Stage05 AR-only checkpoint requires the original Action Expert "
+                    "configuration bytes and SHA-256"
+                )
+            if hashlib.sha256(source_bytes).hexdigest() != source_sha256:
+                raise ValueError("Stage05 Action Expert source config hash mismatch")
+            Path(action_config_path).write_bytes(source_bytes)
+        else:
+            with open(action_config_path, "w") as json_file:
+                json.dump(resolved_action_config, json_file, indent=4, sort_keys=True)
+                json_file.write("\n")
         save_difference_query_artifacts(
             save_directory,
             enabled=self.use_difference_query,
@@ -600,20 +816,90 @@ class ZR0Model(nn.Module):
                 else None
             ),
         )
+        generic_contract = None
+        if self.action_expert is not None:
+            from utils.action_expert_config import architecture_config_hash
+
+            source_horizon = int(
+                getattr(
+                    self,
+                    "action_expert_source_action_horizon",
+                    resolved_action_config["action_horizon"],
+                )
+            )
+            target_horizon = int(resolved_action_config["action_horizon"])
+            runtime_purpose = self.checkpoint_load_purpose or "legacy"
+            # A newly saved Stage05 Joint artifact is the completed target of
+            # AR-to-Joint initialization, but its future consumer semantics
+            # are Joint resume.  Keep that distinction explicit in the
+            # generic contract instead of serializing the loader purpose.
+            if is_stage05_joint:
+                runtime_purpose = STAGE05_JOINT_RESUME
+            runtime_contract = {
+                "purpose": runtime_purpose,
+                "checkpoint_kind": _checkpoint_kind_for_loss_type(self.loss_type),
+                "action_horizon": target_horizon,
+                "source_action_horizon": source_horizon,
+                "target_action_horizon": target_horizon,
+            }
+            generic_contract = {
+                "version": 1,
+                "architecture_hash": architecture_config_hash(resolved_action_config),
+                "runtime_contract": runtime_contract,
+                "runtime_contract_hash": _canonical_json_hash(runtime_contract),
+                "config_file": "action_expert_config.json",
+                "raw_file_sha256": hashlib.sha256(
+                    Path(action_config_path).read_bytes()
+                ).hexdigest(),
+                "source_config_sha256": getattr(
+                    self, "action_expert_config_source_sha256", None
+                ),
+                "canonical_sha256": _canonical_json_hash(resolved_action_config),
+                "state_dict_shapes": {
+                    name: list(value.shape)
+                    for name, value in self.action_expert.state_dict().items()
+                },
+            }
+            generic_contract["content_hash"] = _canonical_json_hash(generic_contract)
+        metadata = {
+            "version": CHECKPOINT_METADATA_VERSION,
+            "checkpoint_kind": _checkpoint_kind_for_loss_type(self.loss_type),
+            "action_expert": {
+                "status": (
+                    "constructed"
+                    if self.action_expert is not None
+                    else "not_constructed_future_joint_config_reference"
+                ),
+                "config_file": "action_expert_config.json",
+                "config_sha256": _canonical_json_hash(resolved_action_config),
+                "weights_file": (
+                    "action_expert.safetensors"
+                    if self.action_expert is not None
+                    else None
+                ),
+            },
+        }
+        if generic_contract is not None:
+            metadata["action_expert_contract"] = generic_contract
+        if is_stage05_ar or is_stage05_joint:
+            metadata[STAGE05_AR_JOINT_CONTRACT_KEY] = build_stage05_ar_joint_contract(
+                checkpoint_directory=save_directory,
+                resolved_action_expert_config=resolved_action_config,
+                source_config_sha256=self.action_expert_config_source_sha256,
+                resolved_dataset_manifest=self.resolved_dataset_manifest,
+                vlm_hidden_size=self.backbone.model.config.text_config.hidden_size,
+                num_difference_queries=self.num_difference_queries,
+                checkpoint_kind="ar_only" if is_stage05_ar else "joint",
+                runtime_purpose=(
+                    STAGE05_AR_TO_JOINT if is_stage05_ar else STAGE05_JOINT_RESUME
+                ),
+            )
         with open(
             os.path.join(save_directory, CHECKPOINT_METADATA_NAME),
             "w",
             encoding="utf-8",
         ) as metadata_file:
-            json.dump(
-                {
-                    "version": CHECKPOINT_METADATA_VERSION,
-                    "checkpoint_kind": _checkpoint_kind_for_loss_type(self.loss_type),
-                },
-                metadata_file,
-                indent=2,
-                sort_keys=True,
-            )
+            json.dump(metadata, metadata_file, indent=2, sort_keys=True)
             metadata_file.write("\n")
         if self.resolved_dataset_manifest is not None:
             write_resolved_dataset_manifest(
@@ -633,7 +919,14 @@ class ZR0Model(nn.Module):
         loss_type="vlm_and_action",
         allow_ar_warm_start=False,
         for_action_inference=False,
+        checkpoint_load_purpose=None,
+        action_horizon=None,
+        action_expert_config_path=None,
+        resume_training=False,
     ):
+        validate_checkpoint_load_purpose_arguments(
+            checkpoint_load_purpose, resume_training=resume_training
+        )
         checkpoint_kind = _read_checkpoint_kind(save_directory)
         action_weights = Path(save_directory) / "action_expert.safetensors"
         if checkpoint_kind is None:
@@ -642,6 +935,79 @@ class ZR0Model(nn.Module):
                 f"legacy checkpoint without {CHECKPOINT_METADATA_NAME}: "
                 f"using conservative {checkpoint_kind} compatibility path"
             )
+        if checkpoint_load_purpose is not None and checkpoint_load_purpose not in CHECKPOINT_LOAD_PURPOSES:
+            raise ValueError(
+                f"unknown checkpoint load purpose: {checkpoint_load_purpose!r}"
+            )
+        metadata_path = Path(save_directory) / CHECKPOINT_METADATA_NAME
+        metadata_payload = {}
+        if metadata_path.is_file():
+            try:
+                metadata_payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except Exception as error:
+                raise ValueError(f"failed to read checkpoint metadata {metadata_path}: {error}") from error
+        stage05_contract_present = isinstance(
+            metadata_payload.get(STAGE05_AR_JOINT_CONTRACT_KEY), dict
+        )
+        generic_contract_present = "action_expert_contract" in metadata_payload
+        stage05_identity = _checkpoint_has_stage05_identity(
+            Path(save_directory).resolve(), metadata_payload
+        )
+        if stage05_identity and not stage05_contract_present:
+            raise ValueError(
+                "checkpoint has Stage05 dataset identity but its Stage05 contract is missing or damaged"
+            )
+        if stage05_identity and checkpoint_load_purpose is None:
+            raise ValueError(
+                "Stage05 checkpoint requires an explicit checkpoint_load_purpose; "
+                "use stage05_ar_resume, stage05_ar_to_joint, stage05_joint_resume, downstream_finetune, "
+                "or inference"
+            )
+        # The legacy boolean remains accepted only for generic legacy callers;
+        # a Stage05 AR checkpoint can never use it as a contract bypass.
+        if (
+            checkpoint_load_purpose is None
+            and allow_ar_warm_start
+            and checkpoint_kind == "ar_only"
+            and (stage05_contract_present or generic_contract_present)
+        ):
+            raise ValueError(
+                "Stage05 AR checkpoint requires explicit "
+                "checkpoint_load_purpose='stage05_ar_to_joint'"
+            )
+        validated_config = None
+        validation_purpose = checkpoint_load_purpose
+        should_validate_purpose = validation_purpose in {
+            STAGE05_AR_RESUME,
+            STAGE05_AR_TO_JOINT,
+            STAGE05_JOINT_RESUME,
+            DOWNSTREAM_FINETUNE,
+            INFERENCE,
+        }
+        if validation_purpose == STAGE05_AR_RESUME and loss_type != "vlm":
+            raise ValueError("stage05_ar_resume requires loss_type=vlm")
+        if should_validate_purpose:
+            validated_config = validate_stage05_checkpoint_for_purpose(
+                save_directory,
+                purpose=validation_purpose,
+                external_config_path=action_expert_config_path,
+                requested_action_horizon=action_horizon,
+                resume_training=resume_training,
+                expected_action_dim=64 if stage05_identity else None,
+                expected_state_dim=64 if stage05_identity else None,
+                expected_num_difference_queries=(
+                    num_difference_queries if num_difference_queries is not None else 32
+                ),
+            )
+            if checkpoint_load_purpose == STAGE05_AR_TO_JOINT:
+                loss_type = "vlm_and_action"
+            elif checkpoint_load_purpose in {STAGE05_JOINT_RESUME, DOWNSTREAM_FINETUNE, INFERENCE}:
+                loss_type = "action" if for_action_inference else loss_type
+        elif generic_contract_present:
+            # Generic contracts are newer artifacts too.  They may retain the
+            # historical no-purpose API, but must still be validated strictly
+            # rather than falling through to an unchecked config load.
+            validated_config = validate_generic_action_expert_contract(save_directory)
         if for_action_inference:
             if checkpoint_kind in {"ar_only", "legacy_ar"}:
                 raise ValueError(
@@ -664,6 +1030,7 @@ class ZR0Model(nn.Module):
             loss_type == "vlm_and_action"
             and checkpoint_kind in {"ar_only", "legacy_ar"}
             and not allow_ar_warm_start
+            and checkpoint_load_purpose != STAGE05_AR_TO_JOINT
         ):
             raise ValueError(
                 "AR checkpoint to joint initialization requires "
@@ -672,16 +1039,22 @@ class ZR0Model(nn.Module):
         if (
             loss_type == "action"
             and checkpoint_kind not in {"action_only", "legacy_full"}
-            and not (for_action_inference and checkpoint_kind == "joint")
+            and not (
+                checkpoint_kind == "joint"
+                and (for_action_inference or checkpoint_load_purpose == DOWNSTREAM_FINETUNE)
+            )
         ):
             raise ValueError(
                 f"checkpoint kind {checkpoint_kind!r} cannot be loaded for loss_type=action"
             )
-        with open(
-            os.path.join(save_directory, "action_expert_config.json"), encoding="utf-8"
-        ) as config_file:
-            action_expert_config_json = json.load(config_file)
-        action_expert_config = FlowmatchingActionHeadConfig(**action_expert_config_json)
+        if validated_config is not None:
+            action_expert_config = validated_config.config
+        else:
+            with open(
+                os.path.join(save_directory, "action_expert_config.json"), encoding="utf-8"
+            ) as config_file:
+                action_expert_config_json = json.load(config_file)
+            action_expert_config = FlowmatchingActionHeadConfig(**action_expert_config_json)
 
         load_action_weights = (
             loss_type != "vlm"
@@ -698,4 +1071,7 @@ class ZR0Model(nn.Module):
             num_difference_queries = num_difference_queries,
             vlm_attention_backend = vlm_attention_backend,
             loss_type=loss_type,
+            checkpoint_load_purpose=checkpoint_load_purpose,
+            resume_training=resume_training,
+            action_expert_config_path=action_expert_config_path,
         )

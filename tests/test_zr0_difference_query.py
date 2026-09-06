@@ -114,9 +114,29 @@ class ZR0DifferenceQueryTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.config = FlowmatchingActionHeadConfig(
+            vlm_output_embedding_dim=4,
+            action_or_state_token_embedding_dim=4,
             action_dim=2,
             state_dim=2,
             action_horizon=3,
+            diffusion_transformer_cfg={
+                "num_attention_heads": 1,
+                "attention_head_dim": 4,
+                "output_dim": 4,
+                "num_layers": 1,
+                "dropout": 0.0,
+                "attention_bias": True,
+                "activation_fn": "gelu-approximate",
+                "upcast_attention": False,
+                "norm_type": "ada_norm",
+                "norm_elementwise_affine": False,
+                "norm_eps": 1e-5,
+                "max_num_positional_embeddings": 128,
+                "positional_embeddings": None,
+                "final_dropout": False,
+                "interleave_self_attention": True,
+                "causal_mask_in_self_attn": False,
+            },
         )
         self.patches = (
             patch("model.reasoning_vla_model.QwenVLBackbone", FakeBackbone),

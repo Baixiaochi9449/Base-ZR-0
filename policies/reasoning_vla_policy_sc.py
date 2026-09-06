@@ -112,6 +112,7 @@ class ZR0Policy(BasePolicy):
         # load model
         self.model = ZR0Model.from_pretrained(
             ckpt_dir,
+            checkpoint_load_purpose="inference",
             use_difference_query=use_difference_query,
             num_difference_queries=num_difference_queries,
             vlm_attention_backend=vlm_attention_backend,

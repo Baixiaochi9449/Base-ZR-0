@@ -27,6 +27,7 @@ def deploy():
     kwargs = {
         "dataset_entry": opt.dataset_entry,
         "ckpt_dir": opt.ckpt_dir,
+        "stats_key": getattr(opt, "stats_key", None),
         "inference_mode": opt.inference_mode,
         "window_size": opt.window_size,
         "num_denoised_steps": opt.num_denoised_steps,

@@ -3,6 +3,7 @@ import math
 import time
 import json
 import hashlib
+from pathlib import Path
 import torch
 import torch.distributed as dist
 from contextlib import nullcontext
@@ -22,6 +23,19 @@ from transformers import get_cosine_with_min_lr_schedule_with_warmup_lr_rate, ge
 from torch.utils.tensorboard import SummaryWriter
 from utils.training_numerics import assert_all_finite
 from utils.wandb_training_logger import WandbTrainingLogger
+from utils.action_expert_config import load_action_expert_config, read_vlm_hidden_size
+from utils.stage05_checkpoint_contract import (
+    DOWNSTREAM_FINETUNE,
+    INFERENCE,
+    STAGE05_AR_RESUME,
+    STAGE05_AR_TO_JOINT,
+    STAGE05_JOINT_RESUME,
+    _checkpoint_has_stage05_identity,
+    validate_checkpoint_load_purpose_arguments,
+    validate_generic_action_expert_contract,
+    validate_stage05_checkpoint_for_purpose,
+    validate_stage05_resume_artifacts,
+)
 from utils.cli_options import parse_train_options
 from utils.training_checkpoint import (
     checkpoint_model_optimizer_scheduler,
@@ -41,6 +55,7 @@ from utils.optimizer_step_loss import (
     global_supervision_counts,
     scaled_microbatch_loss,
 )
+from utils.dataset_seen_tracker import DatasetSeenTracker
 
 def parse_option(args=None):
     return parse_train_options(args)
@@ -151,7 +166,22 @@ def module_parameter_sha256(module) -> str | None:
     return digest.hexdigest()
 
 
-def write_initialization_manifest(model, opt, ownership_counts) -> str:
+def write_wandb_finish_diagnostics(metrics_log, writer, *, step: int, diagnostics: dict):
+    record = {"event": "wandb_finish", "step": int(step), **diagnostics}
+    if writer is not None:
+        for name, value in diagnostics.items():
+            writer.add_scalar(name.replace("_", "-"), value, step)
+    if metrics_log is not None:
+        metrics_log.write(
+            json.dumps(record, ensure_ascii=True, sort_keys=True) + "\n"
+        )
+        metrics_log.flush()
+    return record
+
+
+def write_initialization_manifest(
+    model, opt, ownership_counts, resolved_action_expert_config=None
+) -> str:
     query = model.backbone.difference_query
     query_config_path = os.path.join(
         opt.vlm_name_or_path, "difference_query_config.json"
@@ -183,6 +213,24 @@ def write_initialization_manifest(model, opt, ownership_counts) -> str:
         "action_expert": {
             "constructed": model.action_expert is not None,
             "source": action_source,
+            "config": (
+                {
+                    "path": str(resolved_action_expert_config.path),
+                    "source_sha256": resolved_action_expert_config.source_sha256,
+                    "resolved_sha256": resolved_action_expert_config.parsed_sha256,
+                    "source_action_horizon": (
+                        resolved_action_expert_config.source_action_horizon
+                    ),
+                    "resolved_action_horizon": (
+                        resolved_action_expert_config.config.action_horizon
+                    ),
+                    "action_horizon_overridden": (
+                        resolved_action_expert_config.action_horizon_overridden
+                    ),
+                }
+                if resolved_action_expert_config is not None
+                else None
+            ),
             "parameter_count": (
                 sum(parameter.numel() for parameter in model.action_expert.parameters())
                 if model.action_expert is not None
@@ -584,28 +632,161 @@ def save_model(accelerator: Accelerator, model, output_ckpt_dir, tag):
         unwrapped_model.save_pretrained(os.path.join(output_ckpt_dir, tag))
     # accelerator.wait_for_everyone()
 
-def resolve_action_expert_config(opt):
-    config_source = None
-    for directory in (opt.action_expert_name_or_path, opt.vlm_name_or_path):
-        if not directory:
-            continue
-        candidate = os.path.join(directory, "action_expert_config.json")
+def resolve_action_expert_config(opt, *, return_resolved=False):
+    purpose = getattr(opt, "checkpoint_load_purpose", None)
+    validate_checkpoint_load_purpose_arguments(
+        purpose, resume_training=getattr(opt, "resume_training", False)
+    )
+    if purpose == INFERENCE:
+        raise ValueError("checkpoint_load_purpose=inference is not a training mode")
+    explicit_path = getattr(opt, "action_expert_config_path", None)
+    if purpose is None:
+        for candidate in (
+            getattr(opt, "vlm_name_or_path", None),
+            getattr(opt, "action_expert_name_or_path", None),
+        ):
+            if not candidate:
+                continue
+            candidate_path = Path(candidate)
+            if candidate_path.is_dir() and _checkpoint_has_stage05_identity(candidate_path):
+                raise ValueError(
+                    "Stage05 checkpoint requires an explicit checkpoint_load_purpose; "
+                    "booleans and legacy config loading cannot bypass its contract"
+                )
+            metadata_path = candidate_path / "zr0_checkpoint_metadata.json"
+            if metadata_path.is_file():
+                try:
+                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                except Exception as error:
+                    raise ValueError(
+                        f"failed to read checkpoint metadata {metadata_path}: {error}"
+                    ) from error
+                if isinstance(metadata, dict) and "action_expert_contract" in metadata:
+                    # Validate newer generic contracts before any legacy
+                    # config lookup or optional horizon override.
+                    validate_generic_action_expert_contract(candidate_path)
+    checkpoint_path = None
+    if opt.action_expert_name_or_path:
+        checkpoint_path = os.path.join(
+            opt.action_expert_name_or_path, "action_expert_config.json"
+        )
+    config_source = checkpoint_path or explicit_path
+    if config_source is None:
+        candidate = os.path.join(opt.vlm_name_or_path, "action_expert_config.json")
         if os.path.isfile(candidate):
             config_source = candidate
-            break
     if config_source is None:
-        config_json = {}
-    else:
-        with open(config_source, encoding="utf-8") as config_file:
-            config_json = json.load(config_file)
-    config_json["action_dim"] = opt.max_pad_state_and_action_length
-    config_json["state_dim"] = opt.max_pad_state_and_action_length
-    config_json["action_horizon"] = opt.action_horizon
-    return FlowmatchingActionHeadConfig(**config_json)
+        raise ValueError(
+            "Action Expert configuration has no authoritative source; pass "
+            "--action_expert_config_path or load a checkpoint containing it"
+        )
+    hidden_size = read_vlm_hidden_size(opt.vlm_name_or_path)
+    if purpose == STAGE05_AR_RESUME:
+        if opt.loss_type != "vlm" or opt.action_expert_name_or_path:
+            raise ValueError("stage05_ar_resume requires loss_type=vlm and no Action Expert weights")
+        validated = validate_stage05_checkpoint_for_purpose(
+            opt.vlm_name_or_path, purpose=purpose, resume_training=opt.resume_training,
+            external_config_path=explicit_path,
+            requested_action_horizon=opt.action_horizon,
+            expected_action_dim=opt.max_pad_state_and_action_length,
+            expected_state_dim=opt.max_pad_state_and_action_length,
+            expected_num_difference_queries=getattr(opt, "num_difference_queries", 32) or 32,
+        )
+        from model.difference_query import resolve_difference_query_config
+
+        resolve_difference_query_config(
+            opt.vlm_name_or_path, None,
+            use_difference_query=opt.use_difference_query,
+            num_difference_queries=opt.num_difference_queries,
+            vlm_attention_backend=opt.vlm_attention_backend,
+        )
+        return validated if return_resolved else validated.config
+    if purpose == STAGE05_AR_TO_JOINT:
+        if explicit_path is None:
+            raise ValueError(
+                "stage05_ar_to_joint requires an AR checkpoint and explicit Expert config"
+            )
+        validated = validate_stage05_checkpoint_for_purpose(
+            opt.vlm_name_or_path,
+            purpose=purpose,
+            external_config_path=explicit_path,
+            requested_action_horizon=opt.action_horizon,
+            expected_action_dim=opt.max_pad_state_and_action_length,
+            expected_state_dim=opt.max_pad_state_and_action_length,
+            expected_num_difference_queries=getattr(opt, "num_difference_queries", 32) or 32,
+        )
+        return validated if return_resolved else validated.config
+    if purpose == STAGE05_JOINT_RESUME:
+        if not checkpoint_path:
+            raise ValueError("stage05_joint_resume requires a Joint checkpoint")
+        validated = validate_stage05_resume_artifacts(
+            opt.vlm_name_or_path,
+            external_config_path=explicit_path,
+            requested_action_horizon=opt.action_horizon,
+            expected_action_dim=opt.max_pad_state_and_action_length,
+            expected_state_dim=opt.max_pad_state_and_action_length,
+            expected_num_difference_queries=getattr(opt, "num_difference_queries", 32) or 32,
+        )
+        return validated if return_resolved else validated.config
+    if purpose == DOWNSTREAM_FINETUNE:
+        if not opt.action_expert_name_or_path:
+            raise ValueError(
+                "downstream_finetune requires --action_expert_name_or_path so "
+                "pretrained Action Expert weights are loaded"
+            )
+        source_checkpoint = opt.action_expert_name_or_path or opt.vlm_name_or_path
+        validated = validate_stage05_checkpoint_for_purpose(
+            source_checkpoint,
+            purpose=purpose,
+            external_config_path=explicit_path,
+            requested_action_horizon=opt.action_horizon,
+            resume_training=getattr(opt, "resume_training", False),
+            expected_action_dim=opt.max_pad_state_and_action_length,
+            expected_state_dim=opt.max_pad_state_and_action_length,
+        )
+        return validated if return_resolved else validated.config
+
+    allow_horizon_override = (
+        checkpoint_path is not None
+        and not getattr(opt, "resume_training", False)
+        and getattr(opt, "loss_type", None) in ("action", "vlm_and_action")
+        and purpose is None
+    )
+    horizon_arguments = (
+        {"action_horizon_override": opt.action_horizon}
+        if allow_horizon_override
+        else {"expected_action_horizon": opt.action_horizon}
+    )
+    resolved = load_action_expert_config(
+        config_source,
+        expected_action_dim=opt.max_pad_state_and_action_length,
+        expected_state_dim=opt.max_pad_state_and_action_length,
+        expected_vlm_hidden_size=hidden_size,
+        **horizon_arguments,
+    )
+    if checkpoint_path and explicit_path:
+        explicit = load_action_expert_config(
+            explicit_path,
+            expected_action_dim=opt.max_pad_state_and_action_length,
+            expected_state_dim=opt.max_pad_state_and_action_length,
+            expected_vlm_hidden_size=hidden_size,
+            **horizon_arguments,
+        )
+        if explicit.parsed_sha256 != resolved.parsed_sha256:
+            raise ValueError(
+                "explicit Action Expert config does not match the loaded checkpoint config"
+            )
+    return resolved if return_resolved else resolved.config
 
 
 def train(opt):
     set_seed(opt.seed)
+
+    # Resolve and, for checkpoint-backed modes, validate the load contract before
+    # constructing Accelerator, DeepSpeed engines, models, or allocating GPUs.
+    resolved_action_expert_config = resolve_action_expert_config(
+        opt, return_resolved=True
+    )
 
     accelerator = Accelerator(
         gradient_accumulation_steps=opt.gradient_accumulation_steps,
@@ -680,6 +861,11 @@ def train(opt):
         dataset_sample_ratios=opt.dataset_sample_ratios,
     )
     resolved_dataset_manifest = concat_dataset.resolved_dataset_manifest
+    seen_tracker = DatasetSeenTracker(
+        concat_dataset,
+        accelerator,
+        resume_directory=opt.vlm_name_or_path if opt.resume_training else None,
+    )
     if accelerator.is_main_process:
         accelerator.print("resolved dataset manifest:")
         accelerator.print(resolved_manifest_json(resolved_dataset_manifest))
@@ -720,7 +906,17 @@ def train(opt):
             "no Action Expert weights requested; reusing a saved config when "
             "available and allocating random weights only for action-capable modes."
         )
-    action_expert_config = resolve_action_expert_config(opt)
+    action_expert_config = resolved_action_expert_config.config
+    accelerator.print(
+        "resolved Action Expert config: "
+        f"path={resolved_action_expert_config.path}, "
+        f"source_action_horizon={resolved_action_expert_config.source_action_horizon}, "
+        f"resolved_action_horizon={action_expert_config.action_horizon}, "
+        "action_horizon_overridden="
+        f"{resolved_action_expert_config.action_horizon_overridden}, "
+        f"source_sha256={resolved_action_expert_config.source_sha256}, "
+        f"resolved_sha256={resolved_action_expert_config.parsed_sha256}"
+    )
 
     if opt.use_lora:
         lora_args = {
@@ -746,15 +942,27 @@ def train(opt):
         num_difference_queries = opt.num_difference_queries,
         vlm_attention_backend = opt.vlm_attention_backend,
         loss_type=opt.loss_type,
+        checkpoint_load_purpose=getattr(opt, "checkpoint_load_purpose", None),
+        resume_training=getattr(opt, "resume_training", False),
+        action_expert_config_path=getattr(opt, "action_expert_config_path", None),
     )
     model.resolved_dataset_manifest = resolved_dataset_manifest
+    model.action_expert_source_action_horizon = int(
+        resolved_action_expert_config.source_action_horizon
+    )
+    model.action_expert_config_source_bytes = (
+        resolved_action_expert_config.path.read_bytes()
+    )
+    model.action_expert_config_source_sha256 = (
+        resolved_action_expert_config.source_sha256
+    )
     accelerator.wait_for_everyone()
 
     ownership_counts = validate_trainable_parameter_ownership(model)
     accelerator.print("trainable parameter ownership:", ownership_counts)
     if accelerator.is_main_process:
         initialization_manifest_path = write_initialization_manifest(
-            model, opt, ownership_counts
+            model, opt, ownership_counts, resolved_action_expert_config
         )
         accelerator.print(
             "initialization manifest:", initialization_manifest_path
@@ -834,6 +1042,12 @@ def train(opt):
         log_dir=opt.wandb_dir,
         group=opt.wandb_group,
         tags=opt.wandb_tags,
+        failure_policy=opt.wandb_failure_policy,
+        pending_capacity=opt.wandb_pending_capacity,
+        retry_base_steps=opt.wandb_retry_base_steps,
+        retry_max_steps=opt.wandb_retry_max_steps,
+        finish_max_attempts=opt.wandb_finish_max_attempts,
+        finish_timeout_seconds=opt.wandb_finish_timeout_seconds,
         config={
             **vars(opt),
             "global_batch_size": total_batch_size,
@@ -977,6 +1191,7 @@ def train(opt):
             resumed_batches(), accelerator.gradient_accumulation_steps
         ):
             first_batch_idx, first_batch = indexed_window[0]
+            seen_tracker.update([batch for _, batch in indexed_window])
             if accelerator.is_main_process and first_batch_idx == 0 and epoch == 0:
                 integrity_check(first_batch, model.backbone.processor)
             training_progress = global_completed_steps / num_total_batches
@@ -1035,6 +1250,20 @@ def train(opt):
                 accelerator.wait_for_everyone()
                 if opt.save_optimizer_and_lr_states:
                     checkpoint_model_optimizer_scheduler(model, opt.output_ckpt_dir, global_completed_steps, lr_scheduler, accelerator)
+                seen_tracker.save(
+                    os.path.join(opt.output_ckpt_dir, f"step-{global_completed_steps}"),
+                    epoch=epoch,
+                    global_step=global_completed_steps,
+                )
+                if opt.save_optimizer_and_lr_states:
+                    seen_tracker.save(
+                        os.path.join(opt.output_ckpt_dir, "latest-model-optimizer-lr"),
+                        epoch=epoch,
+                        global_step=global_completed_steps,
+                    )
+                seen_tracker.save(
+                    opt.output_ckpt_dir, epoch=epoch, global_step=global_completed_steps
+                )
                 accelerator.wait_for_everyone()
 
             do_log = (
@@ -1067,22 +1296,26 @@ def train(opt):
                 if global_grad_norm is not None:
                     scalar_metrics["train/grad_norm"] = float(global_grad_norm)
 
+                wandb_diagnostics = wandb_logger.log(
+                    step=global_completed_steps,
+                    mean_metrics=mean_metrics,
+                    scalar_metrics=scalar_metrics,
+                )
+
                 if accelerator.is_main_process:
                     local_record = {
                         "step": global_completed_steps,
                         "epoch": epoch,
                         "learning_rate": lr_scheduler.get_last_lr()[0],
                         **json_scalar_metrics(output_metrics),
+                        **wandb_diagnostics,
                     }
+                    if writer is not None:
+                        for name, value in wandb_diagnostics.items():
+                            writer.add_scalar(name.replace("_", "-"), value, global_completed_steps)
                     line = json.dumps(local_record, ensure_ascii=True, sort_keys=True)
                     print(f"optimizer_step_metrics={line}", flush=True)
                     metrics_log.write(line + "\n")
-
-                wandb_logger.log(
-                    step=global_completed_steps,
-                    mean_metrics=mean_metrics,
-                    scalar_metrics=scalar_metrics,
-                )
 
             if reached_max_train_steps:
                 break
@@ -1110,13 +1343,36 @@ def train(opt):
             accelerator.wait_for_everyone()
             if opt.save_optimizer_and_lr_states:
                 checkpoint_model_optimizer_scheduler(model, opt.output_ckpt_dir, global_completed_steps, lr_scheduler, accelerator)
+            seen_tracker.save(
+                os.path.join(opt.output_ckpt_dir, f"step-{global_completed_steps}"),
+                epoch=epoch,
+                global_step=global_completed_steps,
+            )
+            if opt.save_optimizer_and_lr_states:
+                seen_tracker.save(
+                    os.path.join(opt.output_ckpt_dir, "latest-model-optimizer-lr"),
+                    epoch=epoch,
+                    global_step=global_completed_steps,
+                )
+            seen_tracker.save(
+                opt.output_ckpt_dir, epoch=epoch, global_step=global_completed_steps
+            )
             accelerator.wait_for_everyone()
 
-    if writer is not None:
-        writer.close()
-    if metrics_log is not None:
-        metrics_log.close()
-    wandb_logger.finish(exit_code=0)
+    try:
+        finish_diagnostics = wandb_logger.finish(exit_code=0)
+        if accelerator.is_main_process:
+            write_wandb_finish_diagnostics(
+                metrics_log,
+                writer,
+                step=global_completed_steps,
+                diagnostics=finish_diagnostics,
+            )
+    finally:
+        if writer is not None:
+            writer.close()
+        if metrics_log is not None:
+            metrics_log.close()
 
 if __name__ == "__main__":
     opt = parse_option()

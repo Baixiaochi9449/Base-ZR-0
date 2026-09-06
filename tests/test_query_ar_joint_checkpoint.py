@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import tempfile
 import unittest
@@ -13,11 +14,50 @@ from torch import nn
 from model.difference_query import DifferenceQuery
 from model.flow_matching_action_head import FlowmatchingActionHeadConfig
 from model.reasoning_vla_model import ZR0Model
+from utils.dataset_manifest import build_resolved_dataset_manifest
+from utils.dataset_spec import ObservationContract, ResolvedDatasetSpec
+from utils.stage05_checkpoint_contract import STAGE05_DATASET_ENTRIES
 from utils.training_checkpoint import (
     CHECKPOINT_TAG,
     checkpoint_model_optimizer_scheduler,
     resume_model_optimizer_scheduler,
 )
+from utils.stage05_checkpoint_contract import DOWNSTREAM_FINETUNE
+
+
+def _production_stage05_manifest(loss_type, *, action_horizon, state_dim, action_dim):
+    specs = [
+        ResolvedDatasetSpec(
+            dataset_entry=name,
+            dataset_path=f"/fixture/{name}",
+            dataset_type="vla",
+            adapter="stage05_mixed_pretraining",
+            target_text_field="train_data",
+            camera_keys=("main", "wrist"),
+            grounding_camera_keys=(),
+            state_key="observation.state",
+            action_key="action",
+            state_dim=state_dim,
+            action_dim=action_dim,
+            action_horizon=action_horizon,
+            stats_path=None,
+            stats_key=name,
+            normalization="q01_q99",
+            normalization_stats=None,
+            sample_ratio=1.0,
+            training_eligibility_exists=True,
+            training_eligibility_used=True,
+            data_version="fixture",
+            observation_contract=ObservationContract(
+                version=1,
+                window_size=1,
+                history_order="single_current_frame",
+                history_stride="not_applicable",
+            ),
+        )
+        for name in STAGE05_DATASET_ENTRIES
+    ]
+    return build_resolved_dataset_manifest(specs, loss_type)
 
 
 class _TinySaveableVlm(nn.Module):
@@ -35,6 +75,10 @@ class _TinySaveableVlm(nn.Module):
 
     def save_pretrained(self, directory):
         save_file(self.state_dict(), Path(directory) / self.filename)
+        Path(directory, "config.json").write_text(
+            json.dumps({"text_config": {"hidden_size": self.config.text_config.hidden_size}}),
+            encoding="utf-8",
+        )
 
 
 class _TinyProcessor:
@@ -82,6 +126,7 @@ class QueryArWarmStartCheckpointTest(unittest.TestCase):
         self.patches = (
             patch("model.reasoning_vla_model.QwenVLBackbone", _TinyBackbone),
             patch("model.reasoning_vla_model.FlowmatchingActionHead", _TinyActionExpert),
+            patch("model.flow_matching_action_head.FlowmatchingActionHead", _TinyActionExpert),
         )
         for active_patch in self.patches:
             active_patch.start()
@@ -94,9 +139,36 @@ class QueryArWarmStartCheckpointTest(unittest.TestCase):
     @staticmethod
     def action_config():
         return FlowmatchingActionHeadConfig(
+            add_pos_embed=True,
+            vlm_output_embedding_dim=3,
+            action_or_state_token_embedding_dim=3,
+            mlp_hidden_size=3,
+            max_seq_len=8,
             action_dim=2,
             state_dim=2,
             action_horizon=3,
+            noise_beta_alpha=1.5,
+            noise_beta_beta=1.0,
+            noise_s=0.999,
+            num_timestep_buckets=32,
+            diffusion_transformer_cfg={
+                "num_attention_heads": 1,
+                "attention_head_dim": 3,
+                "output_dim": 3,
+                "num_layers": 1,
+                "dropout": 0.0,
+                "attention_bias": True,
+                "activation_fn": "gelu-approximate",
+                "upcast_attention": False,
+                "norm_type": "ada_norm",
+                "norm_elementwise_affine": False,
+                "norm_eps": 1e-5,
+                "max_num_positional_embeddings": 8,
+                "positional_embeddings": None,
+                "final_dropout": False,
+                "interleave_self_attention": True,
+                "causal_mask_in_self_attn": False,
+            },
         )
 
     def model(
@@ -153,6 +225,12 @@ class QueryArWarmStartCheckpointTest(unittest.TestCase):
             (checkpoint / "zr0_checkpoint_metadata.json").read_text(encoding="utf-8")
         )
         self.assertEqual(metadata["checkpoint_kind"], "ar_only")
+        self.assertEqual(
+            metadata["action_expert"]["status"],
+            "not_constructed_future_joint_config_reference",
+        )
+        self.assertIsNone(metadata["action_expert"]["weights_file"])
+        self.assertTrue(metadata["action_expert"]["config_sha256"])
         restored = ZR0Model.from_pretrained(
             checkpoint,
             tune_vlm=True,
@@ -168,6 +246,293 @@ class QueryArWarmStartCheckpointTest(unittest.TestCase):
             rtol=0,
             atol=0,
         )
+
+    def test_stage05_ar_save_persists_contract_without_expert_weights(self):
+        from utils.stage05_checkpoint_contract import (
+            STAGE05_AR_JOINT_CONTRACT_KEY,
+            STAGE05_DATASET_ENTRIES,
+        )
+
+        source = self.model(
+            self.root / "base-stage05", explicit_query=True, loss_type="vlm"
+        )
+        source.resolved_dataset_manifest = {
+            "format_version": 4,
+            "loss_type": "vlm",
+            "entries": [
+                {
+                    "dataset_entry": name,
+                    "resolved_adapter": "stage05_mixed_pretraining",
+                }
+                for name in STAGE05_DATASET_ENTRIES
+            ],
+        }
+        config_payload = json.loads(json.dumps(source.action_expert_config.to_dict()))
+        config_bytes = (json.dumps(config_payload, sort_keys=True) + "\n").encode()
+        source.action_expert_config_source_bytes = config_bytes
+        source.action_expert_config_source_sha256 = hashlib.sha256(
+            config_bytes
+        ).hexdigest()
+        checkpoint = self.root / "stage05-ar-contract"
+        source.save_pretrained(checkpoint)
+
+        metadata = json.loads(
+            (checkpoint / "zr0_checkpoint_metadata.json").read_text(encoding="utf-8")
+        )
+        contract = metadata[STAGE05_AR_JOINT_CONTRACT_KEY]
+        self.assertEqual(metadata["checkpoint_kind"], "ar_only")
+        self.assertEqual(contract["num_difference_queries"], 4)
+        self.assertEqual(
+            contract["action_expert_config"]["raw_file_sha256"],
+            source.action_expert_config_source_sha256,
+        )
+        self.assertFalse((checkpoint / "action_expert.safetensors").exists())
+
+        with self.assertRaisesRegex(ValueError, "explicit checkpoint_load_purpose"):
+            ZR0Model.from_pretrained(
+                checkpoint,
+                tune_vlm=True,
+                tune_action_expert=False,
+                loss_type="vlm",
+            )
+
+    def test_stage05_joint_save_requires_explicit_load_purpose(self):
+        from utils.stage05_checkpoint_contract import (
+            STAGE05_AR_JOINT_CONTRACT_KEY,
+            validate_stage05_checkpoint_for_purpose,
+        )
+
+        source = self.model(
+            self.root / "base-stage05-joint", explicit_query=True, loss_type="vlm_and_action"
+        )
+        source.resolved_dataset_manifest = _production_stage05_manifest(
+            "vlm_and_action", action_horizon=3, state_dim=2, action_dim=2
+        )
+        config_payload = json.loads(json.dumps(source.action_expert_config.to_dict()))
+        config_bytes = (json.dumps(config_payload, sort_keys=True) + "\n").encode()
+        source.action_expert_config_source_bytes = config_bytes
+        source.action_expert_config_source_sha256 = hashlib.sha256(config_bytes).hexdigest()
+        checkpoint = self.root / "stage05-joint-contract"
+        source.save_pretrained(checkpoint)
+        (checkpoint / "config.json").write_text(
+            json.dumps({"text_config": {"hidden_size": 3}}), encoding="utf-8"
+        )
+
+        metadata = json.loads(
+            (checkpoint / "zr0_checkpoint_metadata.json").read_text(encoding="utf-8")
+        )
+        contract = metadata[STAGE05_AR_JOINT_CONTRACT_KEY]
+        self.assertEqual(metadata["checkpoint_kind"], "joint")
+        self.assertEqual(contract["runtime_contract"]["loss_type"], "vlm_and_action")
+        self.assertEqual(contract["checkpoint_kind"], "joint")
+        self.assertTrue((checkpoint / "action_expert.safetensors").is_file())
+        validate_stage05_checkpoint_for_purpose(
+            checkpoint,
+            purpose="downstream_finetune",
+            external_config_path=checkpoint / "action_expert_config.json",
+            requested_action_horizon=3,
+            expected_action_dim=2,
+            expected_state_dim=2,
+            expected_num_difference_queries=4,
+        )
+        with self.assertRaisesRegex(ValueError, "explicit checkpoint_load_purpose"):
+            ZR0Model(
+                vlm_name_or_path=str(checkpoint),
+                action_expert_name_or_path=str(checkpoint),
+                action_expert_config=source.action_expert_config,
+                tune_vlm=True,
+                tune_action_expert=True,
+                loss_type="vlm_and_action",
+                use_difference_query=True,
+                num_difference_queries=4,
+                vlm_attention_backend="sdpa",
+            )
+        with self.assertRaisesRegex(ValueError, "explicit checkpoint_load_purpose"):
+            ZR0Model.from_pretrained(
+                checkpoint,
+                tune_vlm=True,
+                tune_action_expert=True,
+                loss_type="vlm_and_action",
+            )
+
+    def test_stage05_h32_joint_loads_as_h10_downstream_and_resumes(self):
+        from utils.stage05_checkpoint_contract import STAGE05_DATASET_ENTRIES
+
+        config = FlowmatchingActionHeadConfig(
+            add_pos_embed=True,
+            vlm_output_embedding_dim=3,
+            action_or_state_token_embedding_dim=3,
+            mlp_hidden_size=3,
+            max_seq_len=256,
+            action_dim=64,
+            state_dim=64,
+            action_horizon=32,
+            noise_beta_alpha=1.5,
+            noise_beta_beta=1.0,
+            noise_s=0.999,
+            num_timestep_buckets=32,
+            diffusion_transformer_cfg={
+                "num_attention_heads": 1,
+                "attention_head_dim": 3,
+                "output_dim": 3,
+                "num_layers": 1,
+                "dropout": 0.0,
+                "attention_bias": True,
+                "activation_fn": "gelu-approximate",
+                "upcast_attention": False,
+                "norm_type": "ada_norm",
+                "norm_elementwise_affine": False,
+                "norm_eps": 1e-5,
+                "max_num_positional_embeddings": 128,
+                "positional_embeddings": None,
+                "final_dropout": False,
+                "interleave_self_attention": True,
+                "causal_mask_in_self_attn": False,
+            },
+        )
+        source = ZR0Model(
+            vlm_name_or_path=str(self.root / "h32-base"),
+            action_expert_name_or_path=None,
+            action_expert_config=config,
+            tune_vlm=True,
+            tune_action_expert=True,
+            loss_type="vlm_and_action",
+            use_difference_query=True,
+            num_difference_queries=4,
+            vlm_attention_backend="sdpa",
+        )
+        source.resolved_dataset_manifest = {
+            "format_version": 4,
+            "loss_type": "vlm_and_action",
+            "entries": [
+                {"dataset_entry": name, "resolved_adapter": "stage05_mixed_pretraining"}
+                for name in STAGE05_DATASET_ENTRIES
+            ],
+        }
+        config_bytes = (json.dumps(config.to_dict(), sort_keys=True) + "\n").encode()
+        source.action_expert_config_source_bytes = config_bytes
+        source.action_expert_config_source_sha256 = hashlib.sha256(config_bytes).hexdigest()
+        source_checkpoint = self.root / "h32-joint"
+        source.save_pretrained(source_checkpoint)
+        (source_checkpoint / "config.json").write_text(
+            json.dumps({"text_config": {"hidden_size": 3}}), encoding="utf-8"
+        )
+
+        downstream = ZR0Model.from_pretrained(
+            source_checkpoint,
+            tune_vlm=True,
+            tune_action_expert=True,
+            loss_type="action",
+            use_difference_query=True,
+            num_difference_queries=4,
+            vlm_attention_backend="sdpa",
+            checkpoint_load_purpose=DOWNSTREAM_FINETUNE,
+            action_horizon=10,
+            action_expert_config_path=source_checkpoint / "action_expert_config.json",
+        )
+        self.assertEqual(downstream.action_expert_config.action_horizon, 10)
+        for name, expected in source.action_expert.state_dict().items():
+            torch.testing.assert_close(downstream.action_expert.state_dict()[name], expected)
+
+        downstream_checkpoint = self.root / "h10-downstream"
+        downstream.save_pretrained(downstream_checkpoint)
+        downstream_metadata = json.loads(
+            (downstream_checkpoint / "zr0_checkpoint_metadata.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        runtime = downstream_metadata["action_expert_contract"]["runtime_contract"]
+        self.assertEqual(runtime["source_action_horizon"], 32)
+        self.assertEqual(runtime["target_action_horizon"], 10)
+        resumed = ZR0Model.from_pretrained(
+            downstream_checkpoint,
+            tune_vlm=True,
+            tune_action_expert=True,
+            loss_type="action",
+            use_difference_query=True,
+            num_difference_queries=4,
+            vlm_attention_backend="sdpa",
+            checkpoint_load_purpose=DOWNSTREAM_FINETUNE,
+            action_horizon=10,
+            resume_training=True,
+        )
+        self.assertEqual(resumed.action_expert_config.action_horizon, 10)
+        for name, expected in downstream.action_expert.state_dict().items():
+            torch.testing.assert_close(resumed.action_expert.state_dict()[name], expected)
+
+        with self.assertRaisesRegex(ValueError, "horizon|mismatch|conflicts"):
+            ZR0Model.from_pretrained(
+                downstream_checkpoint,
+                for_action_inference=True,
+                checkpoint_load_purpose="inference",
+                action_horizon=11,
+                use_difference_query=True,
+                num_difference_queries=4,
+                vlm_attention_backend="sdpa",
+            )
+
+        tampered = json.loads(
+            (downstream_checkpoint / "action_expert_config.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        tampered["action_horizon"] = 11
+        (downstream_checkpoint / "action_expert_config.json").write_text(
+            json.dumps(tampered), encoding="utf-8"
+        )
+        with self.assertRaisesRegex(ValueError, "raw hash mismatch"):
+            ZR0Model.from_pretrained(
+                downstream_checkpoint,
+                for_action_inference=True,
+                checkpoint_load_purpose="inference",
+                use_difference_query=True,
+                num_difference_queries=4,
+                vlm_attention_backend="sdpa",
+            )
+
+    def test_generic_joint_supports_arbitrary_compatible_downstream_horizon(self):
+        for source_horizon, target_horizon in (
+            (32, 10),
+            (16, 8),
+            (8, 16),
+            (8, 8),
+        ):
+            config = self.action_config()
+            config.action_dim = 64
+            config.state_dim = 64
+            config.action_horizon = source_horizon
+            config.max_seq_len = 64
+            config.diffusion_transformer_cfg["max_num_positional_embeddings"] = 64
+            source = ZR0Model(
+                vlm_name_or_path=str(self.root / f"generic-base-{source_horizon}"),
+                action_expert_name_or_path=None,
+                action_expert_config=config,
+                tune_vlm=True,
+                tune_action_expert=True,
+                loss_type="vlm_and_action",
+                use_difference_query=True,
+                num_difference_queries=4,
+                vlm_attention_backend="sdpa",
+            )
+            checkpoint = self.root / f"generic-{source_horizon}-to-{target_horizon}"
+            source.save_pretrained(checkpoint)
+            target = ZR0Model.from_pretrained(
+                checkpoint,
+                tune_vlm=True,
+                tune_action_expert=True,
+                loss_type="vlm_and_action",
+                checkpoint_load_purpose=DOWNSTREAM_FINETUNE,
+                action_horizon=target_horizon,
+                action_expert_config_path=checkpoint / "action_expert_config.json",
+                use_difference_query=True,
+                num_difference_queries=4,
+                vlm_attention_backend="sdpa",
+            )
+            self.assertEqual(target.action_expert_config.action_horizon, target_horizon)
+            for name, expected in source.action_expert.state_dict().items():
+                torch.testing.assert_close(
+                    target.action_expert.state_dict()[name], expected, rtol=0, atol=0
+                )
 
     def test_ar_training_state_resume_has_no_action_expert_payload(self):
         torch.manual_seed(73)
@@ -297,6 +662,59 @@ class QueryArWarmStartCheckpointTest(unittest.TestCase):
             ValueError, "joint.*requires the same checkpoint.*Action Expert"
         ):
             self.model(checkpoint, action_path=None, loss_type="vlm_and_action")
+
+    def test_action_expert_weights_round_trip_across_fresh_horizon_change(self):
+        source = self.model(
+            self.root / "base-cross-horizon",
+            explicit_query=True,
+            loss_type="action",
+        )
+        with torch.no_grad():
+            for parameter in source.action_expert.parameters():
+                parameter.fill_(0.625)
+        source_checkpoint = self.root / "source-horizon-3"
+        source.save_pretrained(source_checkpoint)
+
+        target_config = self.action_config()
+        target_config.action_horizon = 2
+        target = ZR0Model(
+            vlm_name_or_path=str(source_checkpoint),
+            action_expert_name_or_path=str(source_checkpoint),
+            action_expert_config=target_config,
+            tune_vlm=True,
+            tune_action_expert=True,
+            loss_type="action",
+        )
+        for name, expected in source.action_expert.state_dict().items():
+            torch.testing.assert_close(
+                target.action_expert.state_dict()[name], expected, rtol=0, atol=0
+            )
+
+        target_checkpoint = self.root / "target-horizon-2"
+        target.save_pretrained(target_checkpoint)
+        saved_config = json.loads(
+            (target_checkpoint / "action_expert_config.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        saved_metadata = json.loads(
+            (target_checkpoint / "zr0_checkpoint_metadata.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(saved_config["action_horizon"], 2)
+        self.assertEqual(saved_metadata["checkpoint_kind"], "action_only")
+        restored = ZR0Model.from_pretrained(
+            target_checkpoint,
+            tune_vlm=True,
+            tune_action_expert=True,
+            loss_type="action",
+        )
+        self.assertEqual(restored.action_expert_config.action_horizon, 2)
+        for name, expected in target.action_expert.state_dict().items():
+            torch.testing.assert_close(
+                restored.action_expert.state_dict()[name], expected, rtol=0, atol=0
+            )
 
     def test_action_inference_loads_action_only_and_joint_but_rejects_ar_only(self):
         checkpoints = {}

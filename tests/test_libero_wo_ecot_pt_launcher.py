@@ -7,10 +7,13 @@ import unittest
 import shlex
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 LAUNCHER = ROOT / "scripts" / "run_libero_wo_ecot_pt.sh"
 PREFLIGHT = ROOT / "scripts" / "preflight_libero_wo_ecot_pt.py"
+AFTER_PRETRAIN = ROOT / "scripts" / "run_libero_finetune_after_pretrain.sh"
 
 
 def load_preflight_module():
@@ -96,6 +99,91 @@ class LiberoWoEcotPtLauncherTest(unittest.TestCase):
         self.assertIn("--save_optimizer_and_lr_states", command)
         self.assertIn("--wandb_run_id test1234", command)
         self.assertIn("--wandb_resume must", command)
+
+    def test_pretrained_arm_warm_starts_complete_joint_checkpoint(self):
+        source = ROOT / "outputs" / "pretrain" / "tabletop_v3_dq32_joint_gbs128_seed42_mbs16_gas2" / "step-19424"
+        result = self.run_launcher("train", arm="difference_query_pretrained")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        command = result.stdout
+        self.assertIn(f"--vlm_name_or_path {source}", command)
+        self.assertIn(f"--action_expert_name_or_path {source}", command)
+        self.assertNotIn("--resume_training", command)
+        self.assertIn("--gradient_accumulation_steps 1", command)
+        self.assertIn("--expected_global_batch_size 64", command)
+        self.assertIn("--per_device_train_batch_size 16", command)
+        self.assertIn("--warmup_ratio 0.08", command)
+        self.assertIn("--max_length 1200", command)
+        self.assertIn("--dataloader_num_workers 24", command)
+        self.assertIn("--wandb_failure_policy required", command)
+        self.assertIn("--loss_type action", command)
+        self.assertIn("--action_horizon 10", command)
+        self.assertIn("--use_difference_query", command)
+        self.assertIn("--num_difference_queries 32", command)
+        self.assertIn("--vlm_attention_backend sdpa", command)
+        self.assertIn(
+            "--wandb_group libero-wo-ecot-pt-difference-query-tabletop-v3-joint-init",
+            command,
+        )
+        self.assertIn("libero_zero2_bf16_mbs16_gas1.yaml", command)
+
+        launch_tokens = shlex.split(command)
+        train_index = launch_tokens.index(str(ROOT / "train_vla.py"))
+        self.assertNotIn("--gradient_accumulation_steps", launch_tokens[:train_index])
+        self.assertEqual(
+            launch_tokens[train_index:].count("--gradient_accumulation_steps"), 1
+        )
+
+    def test_pretrained_arm_resume_uses_its_own_full_checkpoint(self):
+        output = ROOT / "outputs" / "ckpts" / "test-pretrained-libero"
+        result = self.run_launcher(
+            "resume",
+            arm="difference_query_pretrained",
+            extra_env={"ZR0_OUTPUT_DIR": str(output)},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing LIBERO initialization/resume checkpoint", result.stderr)
+
+    def test_pretrained_accelerate_config_has_exact_batch_contract(self):
+        config_path = (
+            ROOT / "accelerate_configs" / "libero_zero2_bf16_mbs16_gas1.yaml"
+        )
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        deepspeed = config["deepspeed_config"]
+
+        self.assertEqual(config["num_processes"], 4)
+        self.assertEqual(config["mixed_precision"], "bf16")
+        self.assertEqual(deepspeed["zero_stage"], 2)
+        self.assertEqual(deepspeed["gradient_accumulation_steps"], 1)
+        self.assertEqual(deepspeed["train_micro_batch_size_per_gpu"], 16)
+        self.assertEqual(deepspeed["train_batch_size"], 64)
+
+    def test_after_pretrain_pipeline_keeps_smoke_and_formal_weights_isolated(self):
+        result = subprocess.run(
+            ["bash", str(AFTER_PRETRAIN), "dry-run"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("step-19424", result.stdout)
+        self.assertIn("smoke=train:2,resume:3", result.stdout)
+        pipeline_source = AFTER_PRETRAIN.read_text(encoding="utf-8")
+        self.assertIn(
+            'records = [record for record in all_records if "total_loss" in record]',
+            pipeline_source,
+        )
+        self.assertIn("tabletop-v3-joint-init", result.stdout)
+
+        source = AFTER_PRETRAIN.read_text(encoding="utf-8")
+        self.assertIn('ZR0_MAX_TRAIN_STEPS=2', source)
+        self.assertIn('ZR0_MAX_TRAIN_STEPS=3', source)
+        self.assertIn('resume difference_query_pretrained', source)
+        self.assertIn('train difference_query_pretrained', source)
+        self.assertIn('if [[ -e "$FORMAL_OUTPUT" ]]', source)
 
     def test_smoke_overrides_add_max_steps_and_isolated_output(self):
         smoke_output = ROOT / "outputs" / "ckpts" / "gradient-fix-smoke-test"
@@ -358,6 +446,43 @@ class LiberoWoEcotPtPreflightTest(unittest.TestCase):
         )
 
         self.assertEqual(headroom, 180.0)
+
+    def test_joint_checkpoint_gate_accepts_complete_dq32_source(self):
+        source = ROOT / "outputs" / "pretrain" / "tabletop_v3_dq32_joint_gbs128_seed42_mbs16_gas2" / "step-19424"
+        reference_path = source / "action_expert_config.json"
+
+        preflight = load_preflight_module()
+        preflight.validate_checkpoint_artifacts(
+            source,
+            "joint",
+            32,
+            32,
+            reference_path,
+        )
+
+    def test_joint_checkpoint_gate_rejects_missing_action_weights(self):
+        from safetensors.torch import save_file
+        import torch
+
+        source = Path(self.temp_dir.name) / "incomplete-joint"
+        source.mkdir()
+        (source / "zr0_checkpoint_metadata.json").write_text(
+            json.dumps({"version": 1, "checkpoint_kind": "joint"}),
+            encoding="utf-8",
+        )
+        save_file({"weight": torch.zeros(1)}, source / "model.safetensors")
+
+        preflight = load_preflight_module()
+        with self.assertRaisesRegex(preflight.PreflightError, "Action Expert"):
+            preflight.validate_checkpoint_artifacts(source, "joint", None, None, None)
+
+    def test_output_space_check_accepts_existing_parent(self):
+        preflight = load_preflight_module()
+        free_gib = preflight.validate_output_space(
+            Path(self.temp_dir.name) / "not-yet-created" / "output", 0.0
+        )
+
+        self.assertGreater(free_gib, 0.0)
 
     def test_cgroup_memory_check_rejects_insufficient_headroom(self):
         preflight = load_preflight_module()

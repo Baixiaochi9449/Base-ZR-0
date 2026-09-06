@@ -3,9 +3,15 @@ import argparse
 import importlib.metadata
 import json
 import os
+import shutil
 import site
 import sys
 from pathlib import Path
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 
 
 EXPECTED_EPISODES = 1693
@@ -47,6 +53,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--min-cgroup-memory-headroom-gib", type=float, default=120.0)
     parser.add_argument("--min-gpu-free-gib", type=float, default=70.0)
+    parser.add_argument("--output-path", type=Path)
+    parser.add_argument("--min-output-free-gib", type=float, default=0.0)
+    parser.add_argument(
+        "--expected-checkpoint-kind",
+        choices=("ar_only", "joint", "action_only"),
+    )
+    parser.add_argument("--expected-num-difference-queries", type=int)
+    parser.add_argument("--expected-source-action-horizon", type=int)
+    parser.add_argument("--reference-action-expert-config", type=Path)
     parser.add_argument("--require-wandb", action="store_true")
     return parser.parse_args()
 
@@ -83,11 +98,199 @@ def require_equal(actual: object, expected: object, label: str) -> None:
         raise PreflightError(f"Expected {label}={expected}, found {actual}")
 
 
-def validate_static_inputs(model_path: Path, fast_path: Path, dataset_path: Path) -> None:
+def require_safetensors(path: Path, label: str, *, expected_shape=None) -> None:
+    try:
+        from safetensors import safe_open
+
+        with safe_open(path, framework="pt", device="cpu") as source:
+            keys = list(source.keys())
+            if not keys:
+                raise PreflightError(f"{label} has no tensors: {path}")
+            if expected_shape is not None:
+                if len(keys) != 1:
+                    raise PreflightError(
+                        f"{label} must contain exactly one tensor, found {keys}"
+                    )
+                tensor = source.get_tensor(keys[0])
+                require_equal(list(tensor.shape), list(expected_shape), f"{label} shape")
+                if not tensor.isfinite().all().item():
+                    raise PreflightError(f"{label} contains NaN or Inf: {path}")
+    except PreflightError:
+        raise
+    except Exception as error:
+        raise PreflightError(f"Cannot read {label} {path}: {error}") from error
+
+
+def validate_model_weight_files(model_path: Path) -> None:
+    single_weight = model_path / "model.safetensors"
+    if single_weight.is_file():
+        require_safetensors(single_weight, "VLM weights")
+        return
+
+    index_path = model_path / "model.safetensors.index.json"
+    if not index_path.is_file():
+        raise PreflightError(
+            f"Missing VLM model.safetensors or model.safetensors.index.json: {model_path}"
+        )
+    index = load_json(index_path)
+    weight_map = index.get("weight_map")
+    if not isinstance(weight_map, dict) or not weight_map:
+        raise PreflightError(f"Invalid VLM weight map: {index_path}")
+    relative_paths = sorted(set(weight_map.values()))
+    for relative_path in relative_paths:
+        if (
+            not isinstance(relative_path, str)
+            or not relative_path
+            or Path(relative_path).is_absolute()
+            or ".." in Path(relative_path).parts
+        ):
+            raise PreflightError(f"Invalid VLM shard path in {index_path}: {relative_path!r}")
+        require_safetensors(model_path / relative_path, "VLM weight shard")
+
+
+def comparable_action_config(config: dict) -> dict:
+    comparable = dict(config)
+    comparable.pop("action_horizon", None)
+    return comparable
+
+
+def validate_checkpoint_artifacts(
+    model_path: Path,
+    expected_kind: str,
+    expected_num_difference_queries: int | None,
+    expected_source_action_horizon: int | None,
+    reference_action_expert_config: Path | None,
+) -> None:
+    metadata_path = model_path / "zr0_checkpoint_metadata.json"
+    require_files(model_path, (metadata_path.name,), "ZR-0 checkpoint metadata")
+    metadata = load_json(metadata_path)
+    require_equal(metadata.get("version"), 1, "checkpoint metadata version")
+    require_equal(metadata.get("checkpoint_kind"), expected_kind, "checkpoint kind")
+    validate_model_weight_files(model_path)
+
+    if expected_kind in {"joint", "action_only"}:
+        require_files(
+            model_path,
+            ("action_expert_config.json", "action_expert.safetensors"),
+            "Action Expert checkpoint",
+        )
+        action_config_path = model_path / "action_expert_config.json"
+        action_config = load_json(action_config_path)
+        try:
+            from utils.action_expert_config import load_action_expert_config, read_vlm_hidden_size
+            from utils.stage05_checkpoint_contract import (
+                _checkpoint_has_stage05_identity,
+                validate_action_expert_weights,
+                validate_generic_action_expert_contract,
+            )
+            checkpoint_metadata = load_json(metadata_path)
+            if isinstance(checkpoint_metadata.get("action_expert_contract"), dict):
+                resolved_config = validate_generic_action_expert_contract(
+                    model_path,
+                    expected_vlm_hidden_size=read_vlm_hidden_size(model_path),
+                    validate_weights=True,
+                )
+            else:
+                resolved_config = load_action_expert_config(
+                    action_config_path,
+                    expected_vlm_hidden_size=read_vlm_hidden_size(model_path),
+                )
+                validate_action_expert_weights(
+                    model_path, resolved_config.config, label="Action Expert weights"
+                )
+        except ValueError as error:
+            raise PreflightError(str(error)) from error
+        metadata = load_json(metadata_path)
+        if _checkpoint_has_stage05_identity(model_path, metadata) and not isinstance(
+            metadata.get("stage05_ar_joint_contract"), dict
+        ):
+            raise PreflightError(
+                "checkpoint carries Stage05 dataset identity but its Stage05 contract is missing"
+            )
+        if expected_source_action_horizon is not None:
+            require_equal(
+                action_config.get("action_horizon"),
+                expected_source_action_horizon,
+                "source Action Expert horizon",
+            )
+        if reference_action_expert_config is not None:
+            if not reference_action_expert_config.is_file():
+                raise PreflightError(
+                    "Missing reference Action Expert config: "
+                    f"{reference_action_expert_config}"
+                )
+            reference_config = load_json(reference_action_expert_config)
+            require_equal(
+                comparable_action_config(action_config),
+                comparable_action_config(reference_config),
+                "Action Expert architecture excluding action_horizon",
+            )
+
+    if expected_num_difference_queries is not None:
+        require_files(
+            model_path,
+            ("difference_query_config.json", "difference_query.safetensors"),
+            "Difference Query checkpoint",
+        )
+        query_config = load_json(model_path / "difference_query_config.json")
+        require_equal(query_config.get("enabled"), True, "Difference Query enabled")
+        require_equal(
+            query_config.get("num_difference_queries"),
+            expected_num_difference_queries,
+            "Difference Query count",
+        )
+        require_equal(query_config.get("attention_backend"), "sdpa", "attention backend")
+        hidden_size = query_config.get("hidden_size")
+        if not isinstance(hidden_size, int) or hidden_size < 1:
+            raise PreflightError(f"Invalid Difference Query hidden size: {hidden_size!r}")
+        require_safetensors(
+            model_path / "difference_query.safetensors",
+            "Difference Query weights",
+            expected_shape=(expected_num_difference_queries, hidden_size),
+        )
+
+
+def existing_parent(path: Path) -> Path:
+    candidate = path.expanduser().resolve()
+    while not candidate.exists():
+        if candidate.parent == candidate:
+            raise PreflightError(f"Cannot resolve an existing parent for output: {path}")
+        candidate = candidate.parent
+    return candidate
+
+
+def validate_output_space(output_path: Path, min_output_free_gib: float) -> float:
+    free_gib = shutil.disk_usage(existing_parent(output_path)).free / 1024**3
+    if free_gib < min_output_free_gib:
+        raise PreflightError(
+            f"Output filesystem has {free_gib:.1f} GiB free; "
+            f"at least {min_output_free_gib:.1f} GiB is required"
+        )
+    return free_gib
+
+
+def validate_static_inputs(
+    model_path: Path,
+    fast_path: Path,
+    dataset_path: Path,
+    *,
+    expected_checkpoint_kind: str | None = None,
+    expected_num_difference_queries: int | None = None,
+    expected_source_action_horizon: int | None = None,
+    reference_action_expert_config: Path | None = None,
+) -> None:
     require_directory(model_path, "Qwen3-VL model")
     require_files(model_path, ("config.json",), "Qwen3-VL model")
     model_config = load_json(model_path / "config.json")
     require_equal(model_config.get("model_type"), "qwen3_vl", "model_type")
+    if expected_checkpoint_kind is not None:
+        validate_checkpoint_artifacts(
+            model_path,
+            expected_checkpoint_kind,
+            expected_num_difference_queries,
+            expected_source_action_horizon,
+            reference_action_expert_config,
+        )
 
     require_directory(fast_path, "FAST tokenizer")
     require_files(
@@ -201,6 +404,8 @@ def validate_runtime(
     min_cgroup_memory_headroom_gib: float,
     min_gpu_free_gib: float,
     require_wandb: bool,
+    output_path: Path | None = None,
+    min_output_free_gib: float = 0.0,
 ) -> None:
     if sys.version_info[:2] != (3, 10):
         raise PreflightError(f"Expected Python 3.10, found {sys.version.split()[0]}")
@@ -242,6 +447,9 @@ def validate_runtime(
         Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
         min_cgroup_memory_headroom_gib,
     )
+    output_free_gib = None
+    if output_path is not None:
+        output_free_gib = validate_output_space(output_path, min_output_free_gib)
 
     require_equal(package_version("flash-attn"), "2.7.3", "flash-attn version")
     require_equal(package_version("transformers"), "4.57.1", "transformers version")
@@ -264,6 +472,7 @@ def validate_runtime(
         f"CUDA {torch.version.cuda}, flash-attn 2.7.3, GPUs={devices}, "
         f"GPU free GiB={[round(value, 1) for value in gpu_free_gib]}, "
         f"cgroup memory headroom={cgroup_headroom_gib:.1f} GiB, "
+        f"output free GiB={round(output_free_gib, 1) if output_free_gib is not None else 'not checked'}, "
         f"W&B={'OK' if require_wandb else 'not required'}"
     )
 
@@ -271,7 +480,15 @@ def validate_runtime(
 def main() -> int:
     args = parse_args()
     try:
-        validate_static_inputs(args.model_path, args.fast_path, args.dataset_path)
+        validate_static_inputs(
+            args.model_path,
+            args.fast_path,
+            args.dataset_path,
+            expected_checkpoint_kind=args.expected_checkpoint_kind,
+            expected_num_difference_queries=args.expected_num_difference_queries,
+            expected_source_action_horizon=args.expected_source_action_horizon,
+            reference_action_expert_config=args.reference_action_expert_config,
+        )
         if not args.static_only:
             validate_runtime(
                 args.model_path,
@@ -279,6 +496,8 @@ def main() -> int:
                 args.min_cgroup_memory_headroom_gib,
                 args.min_gpu_free_gib,
                 args.require_wandb,
+                args.output_path,
+                args.min_output_free_gib,
             )
     except PreflightError as error:
         print(f"Preflight failed: {error}", file=sys.stderr)

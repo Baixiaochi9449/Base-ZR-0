@@ -323,6 +323,13 @@ class QwenVLBackbone(nn.Module):
 
         use_cache = False if self.training else True
         model_inputs = dict(vl_inputs)
+        has_ar_supervision = (
+            compute_vlm_loss
+            and isinstance(model_inputs.get("labels"), torch.Tensor)
+            and model_inputs["labels"][..., 1:].ne(-100).any()
+        )
+        if compute_vlm_loss and not has_ar_supervision:
+            model_inputs.pop("labels", None)
         if not compute_vlm_loss:
             model_inputs.pop("labels", None)
             model_inputs["logits_to_keep"] = torch.empty(
@@ -340,11 +347,14 @@ class QwenVLBackbone(nn.Module):
         # Transformers records Qwen3-VL decoder outputs before its final RMSNorm.
         raw_last_hidden_state = model_outputs["hidden_states"][-1]
         embeddings = _get_qwen_final_text_norm(self.model)(raw_last_hidden_state)
-        vlm_loss = (
-            model_outputs["loss"]
-            if compute_vlm_loss and "labels" in vl_inputs
-            else None
-        )
+        if compute_vlm_loss:
+            vlm_loss = (
+                model_outputs["loss"]
+                if has_ar_supervision
+                else embeddings.sum() * 0.0
+            )
+        else:
+            vlm_loss = None
 
         # let the action expert only attend to the input (i.e., "image+text prompt" part) of the VLM,
         # including the generation prompt '<|im_start|>assistant\n'. Thus, during inference, we should set `add_generation_prompt` to True.
@@ -418,7 +428,12 @@ class QwenVLBackbone(nn.Module):
         ):
             if key in vl_inputs:
                 model_inputs[key] = vl_inputs[key]
-        if compute_vlm_loss and sequence.labels is not None:
+        has_ar_supervision = (
+            compute_vlm_loss
+            and sequence.labels is not None
+            and sequence.labels[..., 1:].ne(-100).any()
+        )
+        if has_ar_supervision:
             model_inputs["labels"] = sequence.labels
 
         if compute_vlm_loss:
@@ -433,7 +448,9 @@ class QwenVLBackbone(nn.Module):
                 raw_last_hidden_state
             )
             vlm_loss = (
-                model_outputs["loss"] if sequence.labels is not None else None
+                model_outputs["loss"]
+                if has_ar_supervision
+                else normalized_hidden_state.sum() * 0.0
             )
         else:
             model_outputs = _get_qwen_multimodal_model(self.model)(
