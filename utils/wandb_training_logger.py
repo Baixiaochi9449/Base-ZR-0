@@ -179,8 +179,11 @@ class WandbTrainingLogger:
 
         reduced_metrics = {}
         for name, value in mean_metrics.items():
+            if isinstance(value, (str, bool)):
+                reduced_metrics[name] = value
+                continue
             reduced_value = self.accelerator.reduce(
-                value.detach().float(), reduction="mean"
+                value.detach().to(device=self.accelerator.device, dtype=torch.float32), reduction="mean"
             )
             if self.accelerator.is_main_process:
                 reduced_metrics[name] = reduced_value.item()

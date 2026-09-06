@@ -110,6 +110,7 @@ class ZR0Policy(BasePolicy):
             window_size=window_size,
             requirements=inference_requirements,
             v2_metadata=self.dataset_meta,
+            checkpoint_directory=ckpt_dir,
         )
         validate_policy_dataset_manifest(
             self.dataset_spec,

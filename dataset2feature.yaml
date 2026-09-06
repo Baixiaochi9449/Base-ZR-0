@@ -10,6 +10,16 @@
 # 
 # Edit this file to add, remove, or update dataset sources as needed for your training and evaluation pipeline.
 
+stage06_libero_flow:
+  dataset_path: /opt/data/private/lq/datasets/lerobot/libero
+  dataset_type: vla
+  dataset_adapter: stage06_libero_flow
+  camera_keys:
+    - observation.images.image
+    - observation.images.image2
+  sample_ratio: 1.0
+  use_quantile: true
+
 table30_vqa:
   dataset_path: /pretrain_data/Table30/table30_vqa
   dataset_type: vlm

@@ -100,6 +100,13 @@ def synchronize_global_step(global_completed_steps: int, accelerator) -> int:
     return int(step_tensor.item())
 
 
+def advance_global_step(global_completed_steps, metrics, accelerator):
+    from utils.optimizer_step_loss import optimizer_update_applied
+    if optimizer_update_applied(metrics) and accelerator.is_main_process:
+        global_completed_steps += 1
+    return synchronize_global_step(global_completed_steps, accelerator)
+
+
 def get_trainable_parameters(model):
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     if not parameters:
@@ -107,10 +114,13 @@ def get_trainable_parameters(model):
     return parameters
 
 
-PARAMETER_OWNERS = ("vlm", "difference_query", "action_expert")
+PARAMETER_OWNERS = ("vlm", "difference_query", "action_expert", "optical_flow_aux", "slot_aux")
 
 
 def trainable_parameter_owner(name: str) -> str:
+    for owner in ("optical_flow_aux", "slot_aux"):
+        if name.startswith(owner + "."):
+            return owner
     if name == "backbone.difference_query.weight" or name.startswith(
         "backbone.difference_query."
     ):
@@ -123,7 +133,7 @@ def trainable_parameter_owner(name: str) -> str:
 
 
 def validate_trainable_parameter_ownership(model) -> dict[str, int]:
-    counts = {owner: 0 for owner in PARAMETER_OWNERS}
+    counts = {owner: 0 for owner in PARAMETER_OWNERS[:3]}
     seen = set()
     for name, parameter in model.named_parameters():
         if not parameter.requires_grad:
@@ -131,7 +141,8 @@ def validate_trainable_parameter_ownership(model) -> dict[str, int]:
         if id(parameter) in seen:
             raise ValueError(f"trainable parameter is registered more than once: {name}")
         seen.add(id(parameter))
-        counts[trainable_parameter_owner(name)] += parameter.numel()
+        owner = trainable_parameter_owner(name)
+        counts[owner] = counts.get(owner, 0) + parameter.numel()
     if not seen:
         raise ValueError("No trainable parameters were found for diagnostics")
     return counts
@@ -239,6 +250,11 @@ def write_initialization_manifest(
             "parameter_sha256": module_parameter_sha256(model.action_expert),
         },
     }
+    if getattr(model, "training_stage", None):
+        manifest.update(training_stage=model.training_stage, stage_description=model.stage_description,
+                        slot_aux_type="none", slot_loss_computed=False,
+                        optical_flow_config=model.optical_flow_config.to_dict(),
+                        optical_flow_initialization=model.aux_initialization)
     filename = (
         "initialization_manifest_resume.json"
         if opt.resume_training
@@ -442,21 +458,37 @@ def run_optimizer_step_window(
     action_expert_loss_weight: float,
     next_global_step: int,
     collect_training_diagnostics: bool = False,
+    optical_flow_config=None,
+    training_stage=None,
 ):
     batches = list(batches)
     if not batches:
         raise ValueError("optimizer-step accumulation window must not be empty")
+    if loss_type == "aux" and (optical_flow_config is None or not optical_flow_config.enabled):
+        raise ValueError("aux optimizer windows require enabled Optical Flow configuration")
     if collect_training_diagnostics and accelerator.device.type == "cuda":
         torch.cuda.synchronize(accelerator.device)
     step_started = time.perf_counter()
     counts = global_supervision_counts(
-        batches, loss_type=loss_type, accelerator=accelerator
+        batches, loss_type=loss_type, accelerator=accelerator,
+        optical_flow_config=optical_flow_config,
     )
+    if loss_type == "aux" and counts.flow_samples.item() == 0:
+        from utils.optical_flow_config import stage_loss_metadata
+        from utils.optimizer_step_loss import optimizer_step_result
+        return {**optimizer_step_result(applied=False, reason="no_supervision"),
+                "flow_eligible_samples": counts.flow_samples,
+                "flow_coverage": counts.flow_samples,
+                **stage_loss_metadata(training_stage or "stage2_aux")}
+    from utils.optimizer_step_loss import OptimizerWindowStep
+    step = OptimizerWindowStep(model=model, optimizer=optimizer, lr_scheduler=lr_scheduler, accelerator=accelerator)
+    flow_sums = {}
     accumulator = OptimizerStepMetricAccumulator(
         loss_type=loss_type,
         vlm_loss_weight=vlm_loss_weight,
         action_expert_loss_weight=action_expert_loss_weight,
         collect_diagnostics=collect_training_diagnostics,
+        device=accelerator.device,
     )
     optimizer.zero_grad()
     is_deepspeed = accelerator.distributed_type == DistributedType.DEEPSPEED
@@ -506,7 +538,13 @@ def run_optimizer_step_window(
                     action_expert_loss_weight=action_expert_loss_weight,
                     gradient_accumulation_steps=accelerator.gradient_accumulation_steps,
                     data_parallel_world_size=accelerator.num_processes,
+                    optical_flow_loss_weight=(optical_flow_config.optical_flow_loss_weight if optical_flow_config else 0.0),
                 )
+                if optical_flow_config is not None and optical_flow_config.enabled:
+                    for key in ("optical_flow_loss_sum", "flow_epe_sum", "flow_motion_epe_sum", "flow_zero_epe_sum",
+                                "flow_valid_fraction_sum", "flow_motion_fraction_sum", "flow_eligible_pixels_sum", "flow_batch_samples"):
+                        value = outputs[key].detach().to(device=accelerator.device, dtype=torch.float32)
+                        flow_sums[key] = flow_sums.get(key, torch.zeros_like(value)) + value
                 assert_all_finite(
                     accelerator, backward_loss, "loss", next_global_step
                 )
@@ -524,10 +562,22 @@ def run_optimizer_step_window(
             )
     elif collect_training_diagnostics:
         diagnostic_metrics.update(module_gradient_norms(model, accelerator))
-    optimizer.step()
-    lr_scheduler.step()
+    step_result = step.finish()
     optimizer.zero_grad()
     metrics = accumulator.finalize(accelerator)
+    if optical_flow_config is not None and optical_flow_config.enabled:
+        reduced = {key: accelerator.reduce(value, reduction="sum") for key, value in flow_sums.items()}
+        count = counts.flow_samples.clamp_min(1)
+        for key, value in reduced.items():
+            if key.endswith("_sum"):
+                metrics[key.removesuffix("_sum")] = value / count
+        metrics["flow_eligible_pixels"] = reduced["flow_eligible_pixels_sum"]
+        metrics["flow_eligible_samples"] = counts.flow_samples
+        metrics["flow_coverage"] = counts.flow_samples / reduced["flow_batch_samples"].clamp_min(1)
+        metrics["weighted_optical_flow_loss"] = metrics["optical_flow_loss"] * optical_flow_config.optical_flow_loss_weight
+        metrics["optical_flow_loss_weight"] = torch.tensor(optical_flow_config.optical_flow_loss_weight, device=accelerator.device)
+        metrics["loss"] = metrics.get("loss", 0) + metrics["weighted_optical_flow_loss"]
+        metrics["total_loss"] = metrics["loss"]
     if collect_training_diagnostics:
         metrics["optimizer_microbatches_per_rank"] = torch.tensor(
             len(batches), dtype=torch.float64, device=accelerator.device
@@ -569,6 +619,10 @@ def run_optimizer_step_window(
                 gpu_peak_memory_reserved_gib=memory[1] / (1024**3),
             )
     metrics.update(diagnostic_metrics)
+    metrics.update(step_result)
+    if "training_stage" in metrics:
+        from utils.optical_flow_checkpoint import record_stage_training_window
+        record_stage_training_window(accelerator.unwrap_model(model), metrics)
     return metrics
 
 
@@ -576,9 +630,10 @@ def tensorboard_loss_value(value) -> float:
     return float(value.detach().float()) if isinstance(value, torch.Tensor) else float(value)
 
 
-def json_scalar_metrics(metrics: dict) -> dict[str, float]:
+def json_scalar_metrics(metrics: dict) -> dict:
     return {
-        name: tensorboard_loss_value(value) for name, value in metrics.items()
+        name: value if isinstance(value, (str, bool)) else tensorboard_loss_value(value)
+        for name, value in metrics.items()
     }
 
 
@@ -624,6 +679,8 @@ def integrity_check(batch_data, processor):
     print("integrity check ends.")
 
 def save_model(accelerator: Accelerator, model, output_ckpt_dir, tag):
+    from utils.optical_flow_checkpoint import reject_flow_zero3
+    reject_flow_zero3(model=accelerator.unwrap_model(model), accelerator=accelerator)
     accelerator.print(f"save model at {tag}")
     # accelerator.wait_for_everyone()
     # save checkpoint
@@ -640,7 +697,7 @@ def resolve_action_expert_config(opt, *, return_resolved=False):
     if purpose == INFERENCE:
         raise ValueError("checkpoint_load_purpose=inference is not a training mode")
     explicit_path = getattr(opt, "action_expert_config_path", None)
-    if purpose is None:
+    if purpose is None and getattr(opt, "training_stage", None) is None:
         for candidate in (
             getattr(opt, "vlm_name_or_path", None),
             getattr(opt, "action_expert_name_or_path", None),
@@ -781,6 +838,11 @@ def resolve_action_expert_config(opt, *, return_resolved=False):
 
 def train(opt):
     set_seed(opt.seed)
+    from utils.optical_flow_config import OpticalFlowConfig
+    flow_config = OpticalFlowConfig(**{name: getattr(opt, name, field.default)
+        for name, field in OpticalFlowConfig.__dataclass_fields__.items()})
+    if getattr(opt, "resume_from_checkpoint", None) and opt.training_stage == "stage3_joint":
+        opt.action_expert_name_or_path = opt.resume_from_checkpoint
 
     # Resolve and, for checkpoint-backed modes, validate the load contract before
     # constructing Accelerator, DeepSpeed engines, models, or allocating GPUs.
@@ -825,6 +887,8 @@ def train(opt):
     )
     if accelerator.distributed_type == DistributedType.DEEPSPEED:
         deepspeed_config = accelerator.state.deepspeed_plugin.deepspeed_config
+        from utils.optical_flow_checkpoint import reject_flow_zero3
+        reject_flow_zero3(config=deepspeed_config, flow_enabled=flow_config.enabled)
         runtime_batch_config = {
             "gradient_accumulation_steps": opt.gradient_accumulation_steps,
             "train_micro_batch_size_per_gpu": opt.per_device_train_batch_size,
@@ -859,6 +923,9 @@ def train(opt):
         loss_type=opt.loss_type,
         max_length=opt.max_length,
         dataset_sample_ratios=opt.dataset_sample_ratios,
+        optical_flow_config=flow_config,
+        optical_flow_data_root=getattr(opt, "optical_flow_data_root", None),
+        optical_flow_manifest=getattr(opt, "optical_flow_manifest", None),
     )
     resolved_dataset_manifest = concat_dataset.resolved_dataset_manifest
     seen_tracker = DatasetSeenTracker(
@@ -941,7 +1008,13 @@ def train(opt):
         use_difference_query = opt.use_difference_query,
         num_difference_queries = opt.num_difference_queries,
         vlm_attention_backend = opt.vlm_attention_backend,
-        loss_type=opt.loss_type,
+        loss_type=None if getattr(opt, "training_stage", None) else opt.loss_type,
+        training_stage=getattr(opt, "training_stage", None),
+        slot_aux_type=getattr(opt, "slot_aux_type", "none"),
+        optical_flow_config=flow_config,
+        init_from_checkpoint=getattr(opt, "init_from_checkpoint", None),
+        resume_from_checkpoint=getattr(opt, "resume_from_checkpoint", None),
+        action_expert_init_seed=opt.seed,
         checkpoint_load_purpose=getattr(opt, "checkpoint_load_purpose", None),
         resume_training=getattr(opt, "resume_training", False),
         action_expert_config_path=getattr(opt, "action_expert_config_path", None),
@@ -1131,6 +1204,11 @@ def train(opt):
     global_completed_steps = 0
     # set model to the train() mode
     model.train()
+    if getattr(opt, "training_stage", None):
+        unwrapped = accelerator.unwrap_model(model)
+        unwrapped.training_sampler_contract = {"seed": opt.seed, "batch_size": opt.per_device_train_batch_size,
+            "gradient_accumulation_steps": opt.gradient_accumulation_steps, "dataloader_length": len(dataloader)}
+        unwrapped.training_data_cursor = {"epoch": 0, "batch_idx": 0}
     
     if opt.resume_training:
         old_output_ckpt_dir = os.path.dirname(opt.vlm_name_or_path)
@@ -1145,6 +1223,10 @@ def train(opt):
             dataloader_length=len(dataloader),
             gradient_accumulation_steps=accelerator.gradient_accumulation_steps,
         )
+        if getattr(opt, "training_stage", None):
+            from utils.training_checkpoint import restore_stage_runtime
+            resume_epoch, resume_batch_idx = restore_stage_runtime(opt.vlm_name_or_path,
+                accelerator.unwrap_model(model), accelerator, global_completed_steps)
 
         accelerator.print("resume epoch:", resume_epoch)
         accelerator.print("resume batch index:", resume_batch_idx)
@@ -1191,6 +1273,11 @@ def train(opt):
             resumed_batches(), accelerator.gradient_accumulation_steps
         ):
             first_batch_idx, first_batch = indexed_window[0]
+            unwrapped = accelerator.unwrap_model(model) if getattr(opt, "training_stage", None) else None
+            if getattr(unwrapped, "pending_resume_rng", None) is not None:
+                from utils.training_checkpoint import restore_rng_state
+                restore_rng_state(unwrapped.pending_resume_rng)
+                unwrapped.pending_resume_rng = None
             seen_tracker.update([batch for _, batch in indexed_window])
             if accelerator.is_main_process and first_batch_idx == 0 and epoch == 0:
                 integrity_check(first_batch, model.backbone.processor)
@@ -1213,7 +1300,27 @@ def train(opt):
                 action_expert_loss_weight=opt.action_expert_loss_weight,
                 next_global_step=next_global_step,
                 collect_training_diagnostics=collect_training_diagnostics,
+                optical_flow_config=flow_config,
+                training_stage=getattr(opt, "training_stage", None),
             )
+            if unwrapped is not None:
+                unwrapped.training_data_cursor = {"epoch": epoch, "batch_idx": indexed_window[-1][0] + 1}
+            global_completed_steps = advance_global_step(global_completed_steps, output_metrics, accelerator)
+            if output_metrics["optimizer_update_skipped"]:
+                reason = output_metrics["optimizer_skip_reason"]
+                if unwrapped is not None and reason == "no_supervision":
+                    unwrapped.skipped_flow_batches = getattr(unwrapped, "skipped_flow_batches", 0) + 1
+                accelerator.print(f"optimizer update skipped: reason={reason}, global_step={global_completed_steps}")
+                if flow_config.enabled:
+                    output_metrics["flow_skipped_batches"] = torch.tensor(getattr(unwrapped, "skipped_flow_batches", 0), device=accelerator.device)
+                wandb_logger.log(step=global_completed_steps,
+                    mean_metrics={f"train/{key}": value for key, value in output_metrics.items()}, scalar_metrics={})
+                if accelerator.is_main_process and metrics_log is not None:
+                    metrics_log.write(json.dumps({"global_step": global_completed_steps,
+                        **json_scalar_metrics(output_metrics)}) + "\n")
+                continue
+            if flow_config.enabled:
+                output_metrics["flow_skipped_batches"] = torch.tensor(getattr(unwrapped, "skipped_flow_batches", 0), device=accelerator.device)
             for metric_name, metric_value in output_metrics.items():
                 if metric_name.endswith("grad_norm"):
                     assert_all_finite(
@@ -1232,12 +1339,6 @@ def train(opt):
                     next_global_step,
                 )
 
-            # Only synchronized optimizer boundaries advance the durable training step.
-            if accelerator.is_main_process:
-                global_completed_steps += 1
-            global_completed_steps = synchronize_global_step(
-                global_completed_steps, accelerator
-            )
             reached_max_train_steps = global_completed_steps >= num_total_batches
 
             do_save = global_completed_steps > 0 and (
@@ -1279,6 +1380,9 @@ def train(opt):
                     writer.add_scalar('training progress', training_progress, global_completed_steps)
 
                     for name, value in output_metrics.items():
+                        if isinstance(value, str):
+                            writer.add_text('train-' + name, value, global_completed_steps)
+                            continue
                         writer.add_scalar(
                             'train-{}'.format(tensorboard_loss_metric_name(name)),
                             tensorboard_loss_value(value),

@@ -16,6 +16,12 @@ from safetensors.torch import save_file, load_file
 import math
 from pathlib import Path
 from utils.dataset_manifest import write_resolved_dataset_manifest
+from utils.optical_flow_config import OpticalFlowConfig, resolve_stage, stage_description, stage_loss_metadata
+from utils.optical_flow_checkpoint import (
+    resolve_flow_checkpoint, load_flow_weights, save_flow_artifacts, module_checksum,
+    initial_stage_training_state, read_stage_training_state, checkpoint_stage_metadata,
+)
+from .optical_flow_aux_head import build_optical_flow_head
 from utils.stage05_checkpoint_contract import (
     CHECKPOINT_LOAD_PURPOSES,
     DOWNSTREAM_FINETUNE,
@@ -51,6 +57,7 @@ def _checkpoint_kind_for_loss_type(loss_type: str) -> str:
         "vlm": "ar_only",
         "action": "action_only",
         "vlm_and_action": "joint",
+        "aux": "aux_only",
     }[loss_type]
 
 
@@ -69,6 +76,7 @@ def _read_checkpoint_kind(directory) -> str | None:
         "ar_only",
         "joint",
         "action_only",
+        "aux_only",
     }:
         raise ValueError(f"invalid checkpoint metadata in {path}")
     return kind
@@ -86,14 +94,52 @@ class ZR0Model(nn.Module):
             use_difference_query=None,
             num_difference_queries=None,
             vlm_attention_backend=None,
-            loss_type="vlm_and_action",
+            loss_type=None,
             checkpoint_load_purpose=None,
             resume_training=False,
             action_expert_config_path=None,
+            training_stage=None,
+            slot_aux_type="none",
+            optical_flow_config=None,
+            init_from_checkpoint=None,
+            resume_from_checkpoint=None,
+            action_expert_init_seed=42,
         ):
         super().__init__()
-
-        if loss_type not in _LOSS_TYPES:
+        if init_from_checkpoint and (resume_from_checkpoint or resume_training):
+            raise ValueError("init_from_checkpoint and resume are mutually exclusive")
+        source = init_from_checkpoint or resume_from_checkpoint
+        if source:
+            if vlm_name_or_path and Path(vlm_name_or_path).resolve() != Path(source).resolve():
+                raise ValueError("VLM source conflicts with explicit checkpoint source")
+            vlm_name_or_path = source
+        resume_training = resume_training or bool(resume_from_checkpoint)
+        self.training_stage = training_stage
+        self.optical_flow_config, flow_payload = resolve_flow_checkpoint(
+            vlm_name_or_path if training_stage is not None else None,
+            optical_flow_config, stage=training_stage, resume=resume_training)
+        loss_type = resolve_stage(training_stage, loss_type, flow=self.optical_flow_config, slot_aux_type=slot_aux_type)
+        self.stage_description = stage_description(training_stage, self.optical_flow_config)
+        self.source_stage_training_state = (read_stage_training_state(flow_payload, OpticalFlowConfig(**flow_payload["config"]))
+                                            if flow_payload else None)
+        self.stage_training_state = None
+        if training_stage is not None:
+            self.stage_training_state = (dict(self.source_stage_training_state)
+                if resume_training and self.source_stage_training_state is not None
+                else initial_stage_training_state(training_stage, self.optical_flow_config))
+        if resume_training and training_stage == "stage3_joint":
+            if action_expert_name_or_path and Path(action_expert_name_or_path).resolve() != Path(vlm_name_or_path).resolve():
+                raise ValueError("stage3 resume requires Expert weights from the same checkpoint")
+            action_expert_name_or_path = vlm_name_or_path
+        if training_stage in {"stage1_ar", "stage2_aux"}:
+            if action_expert_name_or_path:
+                raise ValueError("stage1/stage2 cannot load Action Expert weights")
+            tune_action_expert = False
+        if training_stage == "stage3_joint" and not tune_action_expert:
+            raise ValueError("stage3_joint requires a trainable Action Expert")
+        if training_stage and action_expert_name_or_path and not resume_training and Path(action_expert_name_or_path).resolve() == Path(vlm_name_or_path).resolve():
+            raise ValueError("initialization requires an independent Action Expert checkpoint")
+        if loss_type not in _LOSS_TYPES and loss_type != "aux":
             raise ValueError(f"loss_type must be one of {sorted(_LOSS_TYPES)}")
         validate_checkpoint_load_purpose_arguments(
             checkpoint_load_purpose, resume_training=resume_training
@@ -138,11 +184,20 @@ class ZR0Model(nn.Module):
                     ) from error
             if _checkpoint_has_stage05_identity(
                 checkpoint_path.resolve(), metadata_payload
-            ) and checkpoint_load_purpose is None:
+            ) and checkpoint_load_purpose is None and training_stage is None:
                 raise ValueError(
                     "Stage05 checkpoint requires an explicit checkpoint_load_purpose"
                 )
-            if "action_expert_contract" in metadata_payload:
+            if training_stage is not None and _checkpoint_has_stage05_identity(checkpoint_path.resolve(), metadata_payload):
+                source_purpose = (STAGE05_AR_TO_JOINT if metadata_payload.get("checkpoint_kind") == "ar_only" else DOWNSTREAM_FINETUNE)
+                validate_stage05_checkpoint_for_purpose(
+                    checkpoint_path, purpose=source_purpose,
+                    external_config_path=action_expert_config_path or checkpoint_path / "action_expert_config.json",
+                    requested_action_horizon=action_expert_config.action_horizon,
+                    expected_action_dim=action_expert_config.action_dim,
+                    expected_state_dim=action_expert_config.state_dim,
+                    expected_num_difference_queries=num_difference_queries or 32)
+            if "action_expert_contract" in metadata_payload and (training_stage is None or checkpoint_source == action_expert_name_or_path):
                 from utils.action_expert_config import read_vlm_hidden_size
 
                 allow_horizon_override = (
@@ -207,7 +262,7 @@ class ZR0Model(nn.Module):
                 if _canonical_json_hash(action_expert_config.to_dict()) != validated_source.parsed_sha256:
                     raise ValueError("Stage05 AR resume requested Expert config mismatch")
                 action_expert_config = validated_source.config
-        if loss_type == "vlm" and source_kind not in (None, "ar_only"):
+        if training_stage is None and loss_type == "vlm" and source_kind not in (None, "ar_only"):
             raise ValueError(
                 f"checkpoint kind {source_kind!r} cannot be loaded for loss_type=vlm"
             )
@@ -215,13 +270,14 @@ class ZR0Model(nn.Module):
             raise ValueError(
                 "checkpoint kind 'action_only' cannot provide the VLM for joint training"
             )
-        if loss_type == "vlm_and_action" and source_kind == "ar_only" and action_expert_name_or_path:
+        if training_stage is None and loss_type == "vlm_and_action" and source_kind == "ar_only" and action_expert_name_or_path:
             raise ValueError(
                 "joint warm start from an ar_only checkpoint must randomly initialize "
                 "the Action Expert and forbids action_expert_name_or_path"
             )
         if (
             source_kind == "ar_only"
+            and training_stage is None
             and loss_type == "vlm_and_action"
             and checkpoint_load_purpose not in (None, STAGE05_AR_TO_JOINT)
         ):
@@ -229,7 +285,7 @@ class ZR0Model(nn.Module):
                 "an ar_only checkpoint requires checkpoint_load_purpose="
                 "'stage05_ar_to_joint' for Joint initialization"
             )
-        if loss_type == "vlm_and_action" and source_kind == "joint":
+        if training_stage is None and loss_type == "vlm_and_action" and source_kind == "joint":
             same_checkpoint = action_expert_name_or_path and (
                 Path(action_expert_name_or_path).resolve()
                 == Path(vlm_name_or_path).resolve()
@@ -283,7 +339,7 @@ class ZR0Model(nn.Module):
 
         difference_query_config = resolve_difference_query_config(
             vlm_name_or_path,
-            action_expert_name_or_path,
+            action_expert_name_or_path if training_stage is None else None,
             use_difference_query=use_difference_query,
             num_difference_queries=num_difference_queries,
             vlm_attention_backend=vlm_attention_backend,
@@ -293,6 +349,10 @@ class ZR0Model(nn.Module):
             difference_query_config.num_difference_queries
         )
         self.vlm_attention_backend = difference_query_config.attention_backend
+        if self.optical_flow_config.enabled and (
+            not self.use_difference_query or self.optical_flow_config.num_flow_queries > self.num_difference_queries
+        ):
+            raise ValueError("OF requires enabled Difference Query and num_flow_queries <= total queries")
 
         self.backbone = QwenVLBackbone(
             vlm_name_or_path,
@@ -310,10 +370,30 @@ class ZR0Model(nn.Module):
             )
         # self.action_expert_config.vlm_output_embedding_dim = self.backbone.model.config.hidden_size
         self.action_expert = None
-        if loss_type != "vlm":
-            self.action_expert = FlowmatchingActionHead(
-                self.action_expert_config, tune_action_expert
-            )
+        if loss_type not in {"vlm", "aux"}:
+            if training_stage is None:
+                self.action_expert = FlowmatchingActionHead(self.action_expert_config, tune_action_expert)
+            else:
+                with torch.random.fork_rng(devices=[]):
+                    torch.random.default_generator.manual_seed(action_expert_init_seed)
+                    self.action_expert = FlowmatchingActionHead(self.action_expert_config, tune_action_expert)
+        self.optical_flow_aux = None
+        if training_stage is not None:
+            before = {"vlm": module_checksum(self.backbone.model),
+                      "query": module_checksum(self.backbone.difference_query) if self.use_difference_query else None}
+            self.optical_flow_aux = build_optical_flow_head(actual_vlm_hidden_size, self.optical_flow_config)
+            load_flow_weights(self.optical_flow_aux, vlm_name_or_path, flow_payload)
+            after = {"vlm": module_checksum(self.backbone.model),
+                     "query": module_checksum(self.backbone.difference_query) if self.use_difference_query else None}
+            if before != after:
+                raise RuntimeError("auxiliary initialization changed VLM/Query")
+            self.aux_initialization = {"source": str(vlm_name_or_path), "before": before, "after": after,
+                                       "flow_source": "checkpoint" if flow_payload and flow_payload["config"]["optical_flow_aux_type"] != "none" else "random",
+                                       "action_expert_source": action_expert_name_or_path or "random_or_absent",
+                                       "action_expert_init_seed": action_expert_init_seed}
+            print(self.stage_description)
+            if self.optical_flow_aux is not None:
+                print("Optical Flow parameter counts:", self.optical_flow_aux.parameter_counts())
         self.detach_vlm_outputs_for_action_expert = detach_vlm_outputs_for_action_expert
         
         if action_expert_name_or_path:
@@ -490,10 +570,10 @@ class ZR0Model(nn.Module):
         requested_loss_type = loss_type if loss_type is not None else dynamic_loss_type
         if requested_loss_type is None:
             return self.loss_type
-        if requested_loss_type not in _LOSS_TYPES:
+        if requested_loss_type not in _LOSS_TYPES | {"aux"}:
             raise ValueError(
                 f"Unrecognized loss_type: {requested_loss_type}. "
-                "Expected one of [vlm, action, vlm_and_action]"
+                "Expected one of [vlm, action, vlm_and_action, aux (stage2_aux only)]"
             )
         if requested_loss_type != self.loss_type:
             raise ValueError(
@@ -667,7 +747,7 @@ class ZR0Model(nn.Module):
         resolved_loss_type = self._resolve_training_loss_type(
             dynamic_loss_type, loss_type
         )
-        if self.action_expert is None and resolved_loss_type != "vlm":
+        if self.action_expert is None and resolved_loss_type not in {"vlm", "aux"}:
             raise ValueError("ar_only model only supports loss_type=vlm")
         vlm_loss_weight = self._validate_loss_weight(
             vlm_loss_weight,
@@ -701,6 +781,16 @@ class ZR0Model(nn.Module):
             backbone_inputs,
             compute_vlm_loss=resolved_loss_type in ("vlm", "vlm_and_action"),
         )
+        flow_outputs = None
+        if getattr(self, "optical_flow_aux", None) is not None:
+            from utils.optical_flow_loss import optical_flow_loss
+            prediction = self.optical_flow_aux(backbone_outputs["backbone_embeddings"][:, -self.optical_flow_config.num_flow_queries:, :])
+            flow_outputs = optical_flow_loss(prediction, batch_inputs, self.optical_flow_config)
+        if resolved_loss_type == "aux":
+            weighted = self.optical_flow_config.optical_flow_loss_weight * flow_outputs["optical_flow_loss"]
+            return BatchFeature({**flow_outputs, "loss": weighted, "total_loss": weighted,
+                                 **stage_loss_metadata(self.training_stage,
+                                     flow=flow_outputs["optical_flow_loss_count"] > 0)})
         vlm_loss = backbone_outputs.get("vlm_loss")
         ar_loss_count = None
         ar_loss_sum = None
@@ -713,7 +803,7 @@ class ZR0Model(nn.Module):
         if resolved_loss_type == "vlm":
             if not isinstance(vlm_loss, torch.Tensor):
                 raise ValueError("backbone did not return vlm_loss for vlm training")
-            return self._loss_outputs(
+            result = self._loss_outputs(
                 ar_loss=vlm_loss,
                 ar_loss_sum=ar_loss_sum,
                 ar_loss_count=ar_loss_count,
@@ -723,6 +813,9 @@ class ZR0Model(nn.Module):
                 vlm_loss_weight=vlm_loss_weight,
                 action_expert_loss_weight=action_expert_loss_weight,
             )
+            if getattr(self, "training_stage", None):
+                result.update(stage_loss_metadata(self.training_stage, ar=ar_loss_count > 0))
+            return result
 
         if self.detach_vlm_outputs_for_action_expert:
             backbone_outputs["backbone_embeddings"] = backbone_outputs["backbone_embeddings"].detach()
@@ -751,7 +844,7 @@ class ZR0Model(nn.Module):
 
         if resolved_loss_type == "vlm_and_action" and not isinstance(vlm_loss, torch.Tensor):
             raise ValueError("backbone did not return vlm_loss for vlm_and_action training")
-        return self._loss_outputs(
+        result = self._loss_outputs(
             ar_loss=vlm_loss if resolved_loss_type == "vlm_and_action" else None,
             ar_loss_sum=ar_loss_sum if resolved_loss_type == "vlm_and_action" else None,
             ar_loss_count=ar_loss_count if resolved_loss_type == "vlm_and_action" else None,
@@ -761,6 +854,16 @@ class ZR0Model(nn.Module):
             vlm_loss_weight=vlm_loss_weight,
             action_expert_loss_weight=action_expert_loss_weight,
         )
+        if flow_outputs is not None:
+            result.update(flow_outputs)
+            result["loss"] = result["loss"] + self.optical_flow_config.optical_flow_loss_weight * flow_outputs["optical_flow_loss"]
+            result["total_loss"] = result["loss"]
+        if getattr(self, "training_stage", None):
+            result.update(stage_loss_metadata(self.training_stage,
+                ar=ar_loss_count is not None and ar_loss_count > 0,
+                flow=flow_outputs is not None and flow_outputs["optical_flow_loss_count"] > 0,
+                fm=flow_matching_loss_count > 0))
+        return result
     
     @property
     def device(self):
@@ -768,6 +871,8 @@ class ZR0Model(nn.Module):
 
     def save_pretrained(self, save_directory):
         os.makedirs(save_directory, exist_ok=True)
+        if getattr(self, "training_stage", None) is not None:
+            save_flow_artifacts(self, save_directory)
         # save backbone model parameter and model config (Qwen-VL)
         self.backbone.model.save_pretrained(save_directory)
         # save backnone's processor
@@ -879,6 +984,8 @@ class ZR0Model(nn.Module):
                 ),
             },
         }
+        if getattr(self, "training_stage", None):
+            metadata.update(**checkpoint_stage_metadata(self), slot_aux_type="none")
         if generic_contract is not None:
             metadata["action_expert_contract"] = generic_contract
         if is_stage05_ar or is_stage05_joint:
@@ -916,14 +1023,42 @@ class ZR0Model(nn.Module):
         use_difference_query=None,
         num_difference_queries=None,
         vlm_attention_backend=None,
-        loss_type="vlm_and_action",
+        loss_type=None,
         allow_ar_warm_start=False,
         for_action_inference=False,
         checkpoint_load_purpose=None,
         action_horizon=None,
         action_expert_config_path=None,
         resume_training=False,
+        training_stage=None,
+        optical_flow_config=None,
+        init_from_checkpoint=None,
+        resume_from_checkpoint=None,
+        action_expert_name_or_path=None,
     ):
+        from utils.optical_flow_checkpoint import read_flow_artifacts
+        flow_payload = read_flow_artifacts(save_directory)
+        if not for_action_inference and checkpoint_load_purpose != INFERENCE:
+            training_stage = training_stage or (flow_payload["training_stage"] if flow_payload else None)
+        if training_stage is not None and not for_action_inference and checkpoint_load_purpose != INFERENCE:
+            from utils.action_expert_config import load_action_expert_config
+            config_path = action_expert_config_path or Path(save_directory) / "action_expert_config.json"
+            arguments = {"expected_action_horizon": action_horizon} if action_horizon is not None else {}
+            expert_config = load_action_expert_config(config_path, **arguments).config
+            expert_source = action_expert_name_or_path
+            restore_saved_stage = (flow_payload is not None and flow_payload["training_stage"] == training_stage
+                                   and not init_from_checkpoint)
+            resume_training = resume_training or restore_saved_stage
+            if (resume_from_checkpoint or resume_training) and training_stage == "stage3_joint":
+                expert_source = str(save_directory)
+            return cls(str(save_directory), expert_source, expert_config,
+                tune_vlm=tune_vlm, tune_action_expert=tune_action_expert,
+                use_difference_query=use_difference_query, num_difference_queries=num_difference_queries,
+                vlm_attention_backend=vlm_attention_backend, loss_type=loss_type,
+                training_stage=training_stage, optical_flow_config=optical_flow_config,
+                init_from_checkpoint=init_from_checkpoint, resume_from_checkpoint=resume_from_checkpoint,
+                resume_training=resume_training)
+        loss_type = loss_type or "vlm_and_action"
         validate_checkpoint_load_purpose_arguments(
             checkpoint_load_purpose, resume_training=resume_training
         )
@@ -1060,7 +1195,7 @@ class ZR0Model(nn.Module):
             loss_type != "vlm"
             and checkpoint_kind in {"joint", "action_only", "legacy_full"}
         )
-        return cls(
+        model = cls(
             vlm_name_or_path = save_directory,
             action_expert_name_or_path=(save_directory if load_action_weights else None),
             action_expert_config = action_expert_config,
@@ -1075,3 +1210,7 @@ class ZR0Model(nn.Module):
             resume_training=resume_training,
             action_expert_config_path=action_expert_config_path,
         )
+        if flow_payload:
+            model.source_stage_training_state = read_stage_training_state(
+                flow_payload, OpticalFlowConfig(**flow_payload["config"]))
+        return model

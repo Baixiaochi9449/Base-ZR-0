@@ -1,5 +1,175 @@
 # Implementation Reference
 
+## Third Optical Flow review: verified optimizer updates
+
+- Date: 2026-09-06. Purpose: do not count AMP overflow as completed supervision.
+- Source: adaptations of `train_vla.py::run_optimizer_step_window`,
+  `utils/optimizer_step_loss.py`, and
+  `utils/optical_flow_checkpoint.py::record_stage_training_window`.
+  New custom `OptimizerWindowStep` centralizes the backend outcome because the
+  existing loss accumulator cannot establish whether parameters were updated.
+  `advance_global_step` consumes the same validated result as checkpoint state.
+- Inputs/outputs: a window's existing optimizer/engine, scheduler and Accelerator
+  produce `optimizer_update_applied`, `optimizer_update_skipped` (booleans), and
+  `optimizer_skip_reason` (`none`, `no_supervision`, `amp_overflow`, or
+  `optimizer_step_skipped`). Device-local collective tensors verify all ranks
+  agree on update status and normalize skip reason. Unknown results or rank
+  disagreement fail instead of creating completed-window evidence.
+- Backend contract: AcceleratedOptimizer uses its actual `step_was_skipped`,
+  with synchronized gradient boundaries checked. Native non-AMP PyTorch
+  AdamW/Adam/SGD have no implicit skip mechanism and retain their existing step
+  behavior. Raw optimizers with an external scaler are rejected; AMP requires
+  the AcceleratedOptimizer result API. Other optimizer implementations, backend
+  types outside NO/MULTI_CPU/MULTI_GPU/DEEPSPEED, and multiple optimizers fail
+  explicitly rather than risk partial or unknown updates.
+- DeepSpeed: use public `engine.was_step_applied()` after Accelerate's backward
+  has called engine.step. An optional engine optimizer overflow signal names
+  the reason; the wrapper's fallback `step_was_skipped=false` is not evidence.
+  Engine-owned schedulers are not stepped again by the trainer. Their state is
+  checked against a pre-window snapshot on a skipped update. External schedulers
+  run only on success. This is based on inspection of installed Accelerate
+  `optimizer.py`, `utils/deepspeed.py`, and DeepSpeed `runtime/engine.py`; tests
+  simulate the engine contract and do not validate a real DeepSpeed runtime.
+- Empty supervision still skips backward/optimizer/scheduler. AMP overflow
+  keeps per-window forward/loss metrics (computed flags may be true) but updates
+  neither durable global step nor cumulative flags/count. JSONL/W&B report skip
+  reason at the unchanged global step for every stage, including legacy loss
+  modes. Only no-supervision increments the existing `flow_skipped_batches`.
+- Checkpoint state schema is now `stage_metadata_version=2` and includes integer
+  `completed_optimizer_windows`, incremented only on a verified update. Version
+  1 did not check AMP results, so v1 or unversioned history warns and migrates to
+  unknown AR/OF/FM flags, Slot false, `legacy_history_unknown=true`, and zero
+  verified windows. The count is a lower bound when legacy history is unknown;
+  subsequent verified updates increase it. Resume preserves this evidence;
+  explicit init resets it. DeepSpeed's own internal attempt counters are backend
+  state; durable training global step comes from the existing client checkpoint
+  state and is a count of confirmed updates.
+- Switches/defaults: no new experiment flags, objectives or optimizer settings.
+  Existing successful updates, Query-off, masks, label normalization, dtype and
+  module ownership are retained; skipped updates now have correct state/logging.
+  ZeRO-3 remains rejected. Supersedes the v1 checkpoint-state semantics below.
+- Tests: new `tests/test_optimizer_amp_skip.py` uses real CPU GradScaler and
+  AcceleratedOptimizer with Inf gradient injection and finite recovery, across
+  all three stages and StepLR/constant/cosine/AcceleratedScheduler. It checks
+  parameters, scheduler, global step, counter, flags and JSONL/W&B. Engine
+  ownership, unknown backends, multiple optimizers and rank disagreement use
+  explicit simulations. Existing regression workers use the production metric
+  serializer to retain new boolean/string results. Commands, results and limits
+  are recorded in `docs/experiments/optical_flow_cpu/experiment.md`.
+
+## Second Optical Flow review: image contract, checkpoint state and aux mode
+
+- Date: 2026-09-06. Purpose: reject inconsistent Stage06 model image inputs,
+  persist structured cumulative stage evidence, and accept explicit stage2 aux.
+- Source: adaptations of `utils/dataset_spec.py::resolve_stage06_flow_contract`,
+  `utils/dataset_manifest.py::dataset_spec_to_manifest` and semantic validation,
+  `utils/load_training_dataset.py::prepare_qwen_vl_inputs_cpu`,
+  `model/reasoning_vla_model.py::ZR0Model`,
+  `utils/optical_flow_checkpoint.py` and `train_vla.py::run_optimizer_step_window`.
+  `utils/cli_options.py` help now documents the already supported stage2 aux mode.
+  No external implementation or new loss/head is introduced.
+- Image contract: the shared custom `qwen_image_input_contract` supplies current
+  224x224 model resize hints. `do_resize=false` means no second processor resize;
+  `random_geometric_augmentation=false` means no unsynchronized random transform.
+  These dimensions describe the model input, not MegaFlow label generation.
+  Training creates this contract; inference reads the saved contract and compares
+  it to the same runtime definition. Missing, malformed or conflicting contracts
+  fail. `vision_input_contract` participates in manifest semantic comparisons.
+  Policy/server validation reads checkpoint JSON plus source info/stats, not HDF5.
+  v2 and Query-off preprocessing remains the same.
+- Custom cumulative state helpers in `utils/optical_flow_checkpoint.py` extend
+  existing save/load code because per-window metrics cannot establish training
+  history. Inputs are globally reduced boolean window flags; output is versioned
+  JSON metadata shared by the ordinary metadata file and OF sidecar. Fields:
+  `training_stage`, `stage_description`, `provisional`, all four
+  `*_loss_computed` flags, `stage_metadata_version=2` (v1 superseded above),
+  `loss_computed_scope=current_stage_completed_optimizer_windows`, and
+  `legacy_history_unknown`. Window flags are ORed only after the optimizer window;
+  standalone forward/evaluation and globally skipped stage2 windows do not mark
+  training evidence. A supervised numerical zero still counts as computed.
+- Fresh construction and explicit initialization reset cumulative flags; resume
+  restores them. Cross-stage source evidence is exposed separately as
+  `source_stage_training_state`, including inference loading. Legacy staged
+  checkpoints without the schema warn, keep unknown AR/OF/FM flags as JSON null,
+  and retain `legacy_history_unknown=true` on resave. Observed subsequent losses
+  become true. Slot is always false; stage3 is always provisional. Ordinary and
+  OF copies must agree. Latest-window JSONL/W&B flags remain per-window metrics.
+- `ZR0Model._resolve_training_loss_type` recognizes aux while retaining exact
+  constructed-mode matching. Only stage2 can be constructed with aux; stage1,
+  stage3 and legacy objective conflicts still fail before any module forward.
+- Switches/defaults/compatibility: existing `training_stage`, Query and OF
+  switches only; no default, optimizer, sampling, mask, Head, loss normalization
+  or action-conditioning change. Legacy unstaged objectives acquire no stage
+  logging or cumulative checkpoint fields. No inference Head/HDF5 requirement.
+- Verification: `tests/test_optical_flow_review_round2.py` tests actual tiny
+  backward/window flags and structured save/load, init/resume, legacy unknowns
+  and inconsistent metadata copies. `tests/test_optical_flow_review.py` tests
+  real Stage06 metadata/tiny policy initialization with valid, missing, malformed
+  and rehashed 448x448 contracts. The existing two-rank Gloo regression now checks
+  cumulative flags on both ranks. Full commands/results and environment limits
+  are in `docs/experiments/optical_flow_cpu/experiment.md`.
+
+## Optical Flow review corrections
+
+- Date: 2026-09-06. Purpose: repair distributed logging devices, Stage06 policy
+  provenance, unsafe ZeRO-3 exports, incomplete Query/OF checkpoints, mixed
+  precision forward, and missing stage/loss-computed log metadata.
+- Sources: adaptations of `utils/optimizer_step_loss.py::OptimizerStepMetricAccumulator`,
+  `train_vla.py::run_optimizer_step_window`, `utils/wandb_training_logger.py::WandbTrainingLogger`,
+  `utils/dataset_spec.py::resolve_dataset_spec`, `utils/stage06_dataset.py::Stage06LiberoDataset`,
+  `policies/reasoning_vla_policy.py::ZR0Policy`,
+  `model/difference_query.py::_read_checkpoint_query_data`,
+  `model/reasoning_vla_model.py::ZR0Model`, and `utils/optical_flow_checkpoint.py`.
+  No external architecture or loss implementation is introduced.
+- Devices and metrics: supervision counts, detached sums, weights and collective
+  inputs use `accelerator.device`, independently of AR/FM presence. W&B also
+  places tensor inputs on that device before reduction. The existing JSONL/W&B
+  path preserves stage strings and boolean computed/provisional fields; Slot
+  remains false with no numeric Slot loss. Computed means valid supervision on
+  at least one rank/microbatch, including a legitimate numerical zero. Empty
+  global stage2 windows log false flags and coverage/skips without updating the
+  optimizer, scheduler or global step. Stage3 without Slot is provisional.
+- Dataset contract: custom `resolve_stage06_flow_contract` centralizes the
+  previously training-only manifest digest, canonical camera/delta schema and
+  224x224 vision metadata. Training reads JSONL and compares its hash to the
+  reader's startup hash. Policy/server read that provenance from the checkpoint's
+  hashed resolved manifest, while validating source image metadata and action
+  statistics through the existing resolver. No HDF5 access is needed in policy.
+- Checkpoints: OF training startup and both save entrypoints reuse a new
+  rejection guard from `utils/optical_flow_checkpoint.py`; direct Head save
+  rejects DeepSpeed partition metadata as well. Supported paths are non-ZeRO
+  and the existing ZeRO-2 path; ZeRO-3 full-parameter gather is not implemented.
+  Hash success alone is not proof of full parameters. OF sidecars require a
+  Query declaration; enabled OF requires complete enabled Query artifacts,
+  consistent counts and Query/Head input width. This supersedes the older
+  statement that missing Query artifacts alone allow legacy random initialization:
+  there must also be no OF artifacts. Explicit Query-off with disabled OF
+  stage metadata remains valid. Init/resume ownership and RNG behavior are unchanged.
+- Dtype: `model/optical_flow_aux_head.py::DenseRegressionFlowHead.forward` casts
+  only its trailing Query input to the projection parameter dtype. This is a
+  differentiable boundary cast, not a parameter conversion. Default parameters
+  and exported weights remain FP32; explicit `.to(dtype)` and outer autocast
+  retain their usual roles. OF loss stays FP32. Attention masks, future-target
+  isolation, query slicing, Action Expert inputs and loss normalization are unchanged.
+- Switches/defaults: the existing stage, OF and Query switches apply. No new
+  CLI flags, objectives, sampling rules or optimizer settings. OF-off does not
+  construct the Head or read Stage06; legacy objectives keep their output schema.
+- Verification: `tests/test_optical_flow_review.py` covers real tiny Qwen
+  FP32/BF16/FP16 backward with/without CPU autocast, all Head/input dtype pairs,
+  Query/OF integrity, export rejection, accelerator-device simulation and actual
+  accumulator/JSONL/W&B calls. A real Stage06 metadata test saves and loads a tiny
+  checkpoint through `ZR0Model` and `ZR0Policy` with HDF5 access forbidden.
+  `tests/test_optical_flow_aux.py` extends real two-rank CPU Gloo tests through
+  W&B logging for mixed labels and synchronized empty windows. Existing legacy
+  loss, Query, policy/server, optimizer, dataset and resume regressions are rerun;
+  old logger test doubles now declare their CPU device.
+- Limits: no real NCCL, OF DeepSpeed engine save/resume, full 2B continuous
+  training or rollout is claimed. Earlier repository ZeRO-2 validation predates
+  OF. CPU FP16 small gradients can underflow; use the normal precision/scaling
+  setup for experiments. Commands and actual review results are recorded in
+  `docs/experiments/optical_flow_cpu/experiment.md`; operational contracts are in
+  `docs/optical_flow_training.md`.
+
 ## Saved processor audit selection for the H10 experiment
 
 - Date: 2026-09-06. Purpose: resolve the explicitly authorized mismatch between the base processor's audit identity and normal saved processor file identities, then continue the original two-stage experiment.
@@ -290,6 +460,22 @@
 - 关闭功能后的行为：未启用 `--resume_training` 时不执行任何恢复跳过；单进程 fresh training 不再调用 `dist.broadcast`。
 - 验证方式：跨两个 epoch 的恢复回归证明只在恢复 epoch 跳过前缀，并核对 global step 从 6 增至 12；单进程未初始化、多进程未初始化报错及多进程已初始化 broadcast 均有单元测试。ZeRO-2 world-size=1 与 2-rank `torchrun` 已实际通过一次更新、生产保存、重构恢复和继续一步。
 - 已知限制：本次没有启动正式 DeepSpeed 训练；四卡真实 2B 短步生产恢复已在后续完成，见顶部 2026-09-03 条目。
+
+## Optical Flow Auxiliary Head 与显式三阶段训练
+
+- 日期：2026-09-06。
+- 修改目的：接入训练期连续光流回归；stage2 当前为 OF-only，stage3 为 AR+FM+OF provisional joint。Slot 未实现，不创建 Head、参数或有效数值 loss；仅报告 `slot_loss_computed=false`。
+- 涉及文件：`model/optical_flow_aux_head.py` 的 `DenseRegressionFlowHead`/factory；`utils/optical_flow_config.py` 的配置、stage/Slot registry；`utils/optical_flow_reader.py::OpticalFlowReader`；`utils/optical_flow_loss.py`；`utils/stage06_dataset.py::Stage06LiberoDataset`；`utils/optical_flow_checkpoint.py`；现有 `ZR0Model`、CLI、dataset spec/collator、optimizer loss accumulator、训练循环与 checkpoint helper 的最小接入；`dataset2feature.yaml`、启动模板、审计/实验文档和对应测试。
+- 实现来源：Head、OF reader/loss、集中配置与 Flow artifact 合同是自定义新增。现有模型没有稠密光流输出或 HDF5 对齐读取能力，不能直接复用 FM Action Expert 作为光流监督 Head。数据侧复用并适配 `utils/stage05_dataset.py::Stage05MixedPretrainingDataset` 的 `_source_data_path`、`_episode_rows`、`_video_path`、`_decode_video`；复用 `utils/load_training_dataset.py::prepare_qwen_vl_inputs_cpu`、`prepare_action_expert_inputs_cpu`、collator、episode sampler；复用 `QwenVLBackbone`、Difference Query mask/sidecar、`ZR0Model._loss_outputs`、`utils/optimizer_step_loss.py` 的全局窗口归一化、`utils/training_checkpoint.py` 的 DeepSpeed 保存恢复。不复制或修改 Difference Query attention mask/Action Expert 数据流。
+- 外部来源：仅消费外部 MegaFlow pseudo-label，未复制模型代码。生成器版本 `ee5b61813db0a76ac0db9034899aade72a0d230c`、外部路径、生成权重 SHA256 和完整 manifest 来源见 `docs/optical_flow_data_audit.md`；生成端 resize 插值未验证为训练端相同，不据此宣称完全一致。
+- 配置开关与默认值：`training_stage=None`、`optical_flow_aux_type=none`、`slot_aux_type=none`；OF loss weight=0；首次启用必须显式正 `num_flow_queries`、正 OF weight。默认 delta=10、resolution=56、grid=14、hidden=256、heads=8、layers=2、cell valid fraction=.5、motion weight=1、motion threshold=.01、epsilon=.001、flow seed=42。Stage1 禁止 OF/Slot/FM，stage2 必须启用 dense Head；stage3 必须启用 AR/FM，OF 可选。CLI 单独保留 `loss_type_explicit`，未传旧默认不构成 stage 冲突。
+- 自定义结构与输入输出：只将 `[B,Nq,H]` 的末尾 N 个 Query 传入 Head；LN -> input projection -> learned 14x14 grid -> 默认两层 8-head cross-attention/residual LN/4x MLP -> bilinear 56x56 -> 3x3 Conv/GroupNorm/GELU -> 3x3 Conv 输出 `[B,2,56,56]`。输出 bias=0、weight std=.001 非零；H=2048 时总计 2,753,538 参数，参数量不随 Flow Query 数变化。初始化隔离 CPU RNG，不改 VLM/Query 或 CUDA RNG。Action Expert 仍读取全部 Query。
+- 数据流：Stage06 registry 读取原始 LIBERO v3 parquet/video，按真实 `(episode_index, frame_index)` 查 manifest/HDF5；启动逐文件验证结构/字段/dtype/index/delta/camera/units/episode 边界，worker 独立懒加载 LRU handle，pickle 不带 handle。数据损坏抛 `DatasetIntegrityError`；未覆盖和尾部 identity/短 delta 返回 unavailable/None。collator 用稀疏索引字典保留真实标签，绝不补全零光流。默认不筛除帧；无同步 flow 几何变换时拒绝随机几何增强。源图像 256x256、实际模型输入 224x224，两相机按 registry 顺序；监督主相机。Stage06 原始数据无 AR 文本，joint 需混入有真实 AR 标签的数据。
+- Loss 与统计：mask-weighted area 到 56x56，不除以4、不重归一化分量；float32 robust EPE=`sqrt(dx^2+dy^2+epsilon^2)-epsilon`，每有效样本计算 valid/motion mean 后按有效样本数平均。跨 rank/整个累积窗口聚合 numerator/count，局部空监督 graph-connected zero；stage2 全局空监督在 forward/backward/AdamW/scheduler 前同步跳过，不增加 global step。Stage3 保留 AR/FM。日志记录 EPE、motion EPE、zero baseline、有效/运动比例、有效样本/像素、coverage/skipped batches。详细公式见 `docs/optical_flow_training.md`。
+- Optimizer 与恢复：沿用原有 AdamW 单组/LR/scheduler/weight decay 默认语义；增加 OF/Slot owner 接口，实际没有的模块不进 optimizer。Stage1/2 不构造 Expert；stage3 按 seed 新建 Expert，只有显式独立来源才加载。`init_from_checkpoint` 只加载 VLM/Query/已有 OF，从 step0 新建训练状态；`resume_from_checkpoint` 同阶段恢复完整模型、DeepSpeed optimizer/scaler、scheduler、每 rank RNG、sampler seed/批量合同及独立数据游标。数据游标包含已跳过 batch，global step 只计更新。新增阶段 sidecar 保存 OF 配置/权重 hash、stage 和初始化前后 VLM/Query checksum，CLI 冲突/缺配置/缺权重/shape mismatch 报错。旧 Stage05 source 合同在新 stage 初始化时仍验证。旧默认路径的合同规则不变。
+- 关闭后的行为：旧三种 loss_type、Query-off/on、已有 DataLoader/训练逻辑保持；不读取 Stage06/HDF5，不创建 Flow Head，不增加 loss 或参数。推理不要求 flow root，直接动作路径不调用 OF Head；旧 checkpoint 无 sidecar 默认关闭。
+- 验证方式：`tests/test_optical_flow_aux.py` 覆盖三阶段/Slot、CLI 显式来源、输入隔离、参数量、梯度、mask pooling、mixed missing、HDF5 LRU/worker/pickle/损坏、跨阶段 stale Expert 隔离、RNG/cursor、CPU Gloo 空 rank/global skip/全局归一化；旧 Query/loss/checkpoint/dataset 回归。`scripts/verify_optical_flow_cpu.py` 验证全部 1693 HDF5 结构/273465 frame 映射；真实 AR step-7284 的 625 VLM 张量和 Query 精确恢复。真实视频/processor 输出 `[1,14,14]` grid，即224x224。16真实标签+固定 synthetic Query overfit，EPE .0250344 -> .00419236，zero baseline .0100784；完整配置/初次失败与后续结果见 `docs/experiments/optical_flow_cpu/experiment.md`。
+- 已知限制：Slot/VQ tokens/推理闭环未实现；稠密文件没有全量重算 SHA256（读取结构与少量标签，保留 manifest hash）；worker 随机状态不序列化，精确 resume 要求无随机增强的确定性 adapter。没有启动正式训练、GPU smoke、完整 VLM overfit、CUDA/DeepSpeed 动态 resume 或 LIBERO rollout；CPU Head overfit 不等于策略性能验证。
 
 ## 第四次审核：Stage05 checkpoint purpose、可配置下游 Horizon 与 token audit 可信规格
 

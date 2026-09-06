@@ -9,7 +9,7 @@ from accelerate.state import AcceleratorState
 from torch import nn
 from transformers import BatchFeature
 
-from train_vla import run_optimizer_step_window
+from train_vla import run_optimizer_step_window, json_scalar_metrics
 
 
 class TinyObjectiveModel(nn.Module):
@@ -169,7 +169,7 @@ def _execute(
         payload = {
             "ar_parameter": float(unwrapped.ar_weight.detach()),
             "fm_parameter": float(unwrapped.fm_weight.detach()),
-            "metrics": {key: float(value) for key, value in metrics.items()},
+            "metrics": json_scalar_metrics(metrics),
         }
     return payload, accelerator
 

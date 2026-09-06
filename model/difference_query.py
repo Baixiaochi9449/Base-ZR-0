@@ -318,6 +318,11 @@ def _read_checkpoint_query_data(directory: Path) -> Optional[_CheckpointQueryDat
     has_config = config_path.is_file()
     has_weights = weight_path.is_file()
 
+    flow_config = directory / "optical_flow_aux_config.json"
+    flow_weights = directory / "optical_flow_aux.safetensors"
+    if (flow_config.exists() or flow_weights.exists()) and not has_config:
+        raise ValueError(f"{directory}: OF checkpoint requires complete Difference Query artifacts; missing config")
+
     if not has_config and not has_weights:
         return None
     if has_weights and not has_config:
@@ -338,6 +343,8 @@ def _read_checkpoint_query_data(directory: Path) -> Optional[_CheckpointQueryDat
         )
 
     enabled = raw_config.get("enabled")
+    if flow_weights.exists() and not enabled:
+        raise ValueError(f"{directory}: OF weights require enabled Difference Query artifacts")
     if not isinstance(enabled, bool):
         raise ValueError(f"{config_path}: enabled must be a boolean")
     hidden_size = _positive_int(raw_config.get("hidden_size"), "hidden_size", config_path)

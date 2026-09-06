@@ -41,6 +41,7 @@ DATASET_SEMANTIC_FIELDS = (
     "observation_contract",
     "sidecar_sha256",
     "canonical_schema",
+    "vision_input_contract",
 )
 
 
@@ -83,6 +84,9 @@ def dataset_spec_to_manifest(
     spec: ResolvedDatasetSpec,
     loss_type: str,
 ) -> dict:
+    if spec.adapter == "stage06_libero_flow":
+        from utils.dataset_spec import validate_stage06_image_contract
+        validate_stage06_image_contract(spec.vision_input_contract)
     return {
         "dataset_entry": spec.dataset_entry,
         "dataset_path": spec.dataset_path,

@@ -20,6 +20,7 @@ from utils.cli_options import parse_train_options
 
 
 class FakeAccelerator:
+    device = torch.device("cpu")
     def __init__(self, is_main_process: bool):
         self.is_main_process = is_main_process
         self.reduce_calls = []

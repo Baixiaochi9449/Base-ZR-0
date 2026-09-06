@@ -19,8 +19,61 @@ SUPPORTED_DATASET_ADAPTERS = (
     "lerobot_v2",
     "lerobot_v3_future_difference",
     "stage05_mixed_pretraining",
+    "stage06_libero_flow",
 )
-SUPPORTED_LOSS_TYPES = ("action", "vlm", "vlm_and_action")
+SUPPORTED_LOSS_TYPES = ("action", "vlm", "vlm_and_action", "aux")
+
+
+def qwen_image_input_contract():
+    """Model resize hints and processor behavior, independent of flow label sizes."""
+    return {"image_width": 224, "image_height": 224, "do_resize": False,
+            "random_geometric_augmentation": False}
+
+
+def validate_stage06_image_contract(contract):
+    expected = qwen_image_input_contract()
+    if (not isinstance(contract, dict) or set(contract) != set(expected)
+            or any(type(contract[key]) is not int or contract[key] <= 0
+                   for key in ("image_width", "image_height"))
+            or any(type(contract[key]) is not bool
+                   for key in ("do_resize", "random_geometric_augmentation"))):
+        raise ValueError("Stage06 vision_input_contract is missing or malformed")
+    if contract != expected:
+        raise ValueError(f"Stage06 vision_input_contract conflicts with runtime preprocessing: "
+                         f"saved={contract}, runtime={expected}")
+    return dict(contract)
+
+
+def resolve_stage06_flow_contract(dataset_entry, entry, checkpoint_directory=None):
+    """Resolve label provenance from JSON metadata only, never from HDF5."""
+    manifest = entry.get("optical_flow_manifest")
+    if checkpoint_directory is not None:
+        from utils.dataset_manifest import load_resolved_dataset_manifest, select_resolved_manifest_entry
+        saved = select_resolved_manifest_entry(load_resolved_dataset_manifest(checkpoint_directory), dataset_entry)
+        digest, schema = saved.get("sidecar_sha256"), saved.get("canonical_schema")
+        vision = validate_stage06_image_contract(saved.get("vision_input_contract"))
+    elif manifest:
+        path = Path(manifest)
+        if not path.is_absolute():
+            path = Path(entry["optical_flow_data_root"]) / path
+        payload = path.read_bytes()
+        rows = [json.loads(line) for line in payload.splitlines() if line.strip()]
+        if not rows or any(row["camera_key"] != "observation.images.image" for row in rows):
+            raise ValueError("Stage06 manifest is empty or has an invalid flow camera")
+        digest = hashlib.sha256(payload).hexdigest()
+        schema = {"flow_camera": "observation.images.image",
+                  "flow_delta_frames": entry.get("flow_delta_frames", 10),
+                  "flow_manifest_sha256": digest}
+        vision = validate_stage06_image_contract(entry.get("vision_input_contract", qwen_image_input_contract()))
+    else:
+        raise ValueError("Stage06 requires a flow manifest or checkpoint dataset contract")
+    if (not isinstance(digest, str) or len(digest) != 64 or not isinstance(schema, dict)
+            or schema.get("flow_manifest_sha256") != digest
+            or schema.get("flow_camera") != "observation.images.image"
+            or schema.get("flow_delta_frames") != 10):
+        raise ValueError("Stage06 checkpoint/manifest has an invalid flow provenance contract")
+    return {"sidecar_sha256": digest, "canonical_schema": schema,
+            "vision_input_contract": vision}
 
 
 @dataclass(frozen=True)
@@ -59,6 +112,8 @@ def resolve_objective_requirements(
             f"loss_type must be one of {list(SUPPORTED_LOSS_TYPES)}, got {loss_type!r}"
         )
     if dataset_type == "vlm":
+        if loss_type == "aux":
+            raise ValueError("OF-only training requires a VLA observation dataset")
         if loss_type == "action":
             entry = dataset_entry or "<unknown>"
             raise ValueError(
@@ -79,6 +134,8 @@ def resolve_objective_requirements(
         )
 
     needs_target = loss_type in {"vlm", "vlm_and_action"}
+    if adapter == "stage06_libero_flow":
+        needs_target = needs_target and target_text_field is not None
     if adapter == "stage05_mixed_pretraining" and loss_type == "vlm_and_action":
         # Joint eligibility is action-only. Text is optional per admitted sample
         # and contributes AR supervision when present.
@@ -553,6 +610,7 @@ def resolve_dataset_spec(
     require_action: bool | None = None,
     requirements: ObjectiveRequirements | None = None,
     v2_metadata: Any = None,
+    checkpoint_directory=None,
 ) -> ResolvedDatasetSpec:
     if not isinstance(dataset_entry, str) or not dataset_entry:
         raise ValueError("dataset_entry must be a non-empty string")
@@ -586,6 +644,38 @@ def resolve_dataset_spec(
         return _resolve_stage05_spec(
             dataset_entry, entry, action_horizon, window_size, requirements
         )
+    if adapter == "stage06_libero_flow":
+        if window_size != 1:
+            raise ValueError("stage06_libero_flow requires window_size=1")
+        root = Path(entry["dataset_path"]).resolve()
+        info = json.loads((root / "meta/info.json").read_text())
+        cameras = tuple(entry["camera_keys"])
+        if "observation.images.image" not in cameras or info["fps"] != 10:
+            raise ValueError("Stage06 LIBERO requires the audited camera and 10 FPS")
+        if any(info["features"][key]["shape"] != [256, 256, 3] for key in cameras):
+            raise ValueError("Stage06 source images must be 256x256 RGB")
+        stats_path = root / "meta/stats.json"
+        stats = json.loads(stats_path.read_text()) if requirements.requires_stats else None
+        if stats is not None:
+            parsed = {}
+            for key, dimension in (("observation.state", 8), ("action", 7)):
+                if info["features"][key]["shape"] != [dimension]:
+                    raise ValueError(f"Stage06 {key} dimension mismatch")
+                parsed[key] = {q: np.asarray(stats[key][q], dtype=np.float32) for q in ("q01", "q99")}
+                if any(value.shape != (dimension,) or not np.isfinite(value).all() for value in parsed[key].values()):
+                    raise ValueError(f"Stage06 {key} quantiles must be finite vectors")
+                if np.any(parsed[key]["q99"] < parsed[key]["q01"]):
+                    raise ValueError(f"Stage06 {key} quantiles are reversed")
+            stats = parsed
+        return ResolvedDatasetSpec(
+            dataset_entry=dataset_entry, dataset_path=str(root), dataset_type="vla", adapter=adapter,
+            target_text_field=entry.get("target_text_field"), camera_keys=cameras, grounding_camera_keys=(),
+            state_key="observation.state", action_key="action", state_dim=8, action_dim=7,
+            action_horizon=action_horizon, stats_path=str(stats_path) if stats else None,
+            stats_key=dataset_entry, normalization="quantile" if stats else "none", normalization_stats=stats,
+            sample_ratio=_sample_ratio(entry, dataset_entry), training_eligibility_exists=False,
+            training_eligibility_used=False, data_version=info["codebase_version"],
+            **resolve_stage06_flow_contract(dataset_entry, entry, checkpoint_directory))
     return _resolve_v2_spec(
         dataset_entry,
         entry,

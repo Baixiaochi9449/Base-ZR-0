@@ -768,6 +768,7 @@ class _WandbModule(types.ModuleType):
 
 
 class _TensorReducingAccelerator:
+    device = torch.device("cpu")
     is_main_process = True
 
     def __init__(self):

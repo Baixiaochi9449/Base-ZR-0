@@ -1,0 +1,212 @@
+"""Flow artifacts and explicit cross-stage initialization contracts."""
+
+import hashlib
+import json
+import warnings
+from pathlib import Path
+import torch
+
+from safetensors.torch import load_file, save_file
+
+from utils.optical_flow_config import OpticalFlowConfig, resolve_stage, stage_description, stage_loss_metadata
+
+
+CONFIG_NAME = "optical_flow_aux_config.json"
+WEIGHTS_NAME = "optical_flow_aux.safetensors"
+COMPUTED_FLAGS = ("ar_loss_computed", "slot_loss_computed", "flow_loss_computed", "fm_loss_computed")
+STAGE_STATE_SCOPE = "current_stage_completed_optimizer_windows"
+
+
+def initial_stage_training_state(stage, config):
+    return {**stage_loss_metadata(stage), "stage_description": stage_description(stage, config),
+            "stage_metadata_version": 2, "loss_computed_scope": STAGE_STATE_SCOPE,
+            "legacy_history_unknown": False, "completed_optimizer_windows": 0}
+
+
+def read_stage_training_state(payload, config):
+    """Read cumulative training evidence; missing legacy evidence is unknown, never true."""
+    state = initial_stage_training_state(payload["training_stage"], config)
+    if payload.get("stage_metadata_version") in (None, 1):
+        warnings.warn("legacy checkpoint has no verified optimizer-update history; history is unknown",
+                      RuntimeWarning, stacklevel=2)
+        state.update({key: None for key in COMPUTED_FLAGS if key != "slot_loss_computed"})
+        state["legacy_history_unknown"] = True
+        # Only verified updates are counted; legacy_history_unknown marks this lower bound.
+        state["completed_optimizer_windows"] = 0
+        return state
+    if payload.get("stage_metadata_version") != 2 or payload.get("loss_computed_scope") != STAGE_STATE_SCOPE:
+        raise ValueError("invalid checkpoint stage metadata version/scope")
+    if type(payload.get("legacy_history_unknown")) is not bool:
+        raise ValueError("invalid checkpoint legacy_history_unknown")
+    count = payload.get("completed_optimizer_windows")
+    if type(count) is not int or count < 0:
+        raise ValueError("invalid checkpoint completed_optimizer_windows")
+    for key in ("training_stage", "stage_description", "provisional"):
+        if payload.get(key) != state[key] or type(payload.get(key)) is not type(state[key]):
+            raise ValueError(f"checkpoint stage metadata mismatch: {key}")
+    for key in COMPUTED_FLAGS:
+        if key not in payload or (type(payload[key]) is not bool
+                                 and not (payload[key] is None and payload["legacy_history_unknown"])):
+            raise ValueError(f"invalid checkpoint computed flag: {key}")
+    if payload["slot_loss_computed"] is not False:
+        raise ValueError("Slot loss is not implemented")
+    allowed = {"stage1_ar": {"ar_loss_computed"}, "stage2_aux": {"flow_loss_computed"},
+               "stage3_joint": {"ar_loss_computed", "fm_loss_computed"} |
+                               ({"flow_loss_computed"} if config.enabled else set())}[payload["training_stage"]]
+    if any(payload[key] is True and key not in allowed for key in COMPUTED_FLAGS):
+        raise ValueError("checkpoint computed flags conflict with training stage")
+    return {key: payload[key] for key in state}
+
+
+def checkpoint_stage_metadata(model):
+    state = getattr(model, "stage_training_state", None)
+    if state is None:
+        state = initial_stage_training_state(model.training_stage, model.optical_flow_config)
+    if state.get("training_stage") != model.training_stage:
+        raise ValueError("checkpoint training state belongs to a different stage")
+    return read_stage_training_state(state, model.optical_flow_config)
+
+
+def record_stage_training_window(model, metrics):
+    """Called after an optimizer window, using flags already reduced across ranks."""
+    if getattr(model, "training_stage", None) is None:
+        return
+    from utils.optimizer_step_loss import optimizer_update_applied
+    if not optimizer_update_applied(metrics):
+        return
+    state = checkpoint_stage_metadata(model)
+    if metrics.get("training_stage") != model.training_stage:
+        raise ValueError("optimizer window stage does not match checkpoint training state")
+    for key in COMPUTED_FLAGS:
+        if type(metrics.get(key)) is not bool:
+            raise ValueError(f"optimizer window is missing boolean {key}")
+        if metrics[key]:
+            state[key] = True
+    state["completed_optimizer_windows"] += 1
+    model.stage_training_state = read_stage_training_state(state, model.optical_flow_config)
+
+
+def reject_flow_zero3(*, model=None, accelerator=None, config=None, flow_enabled=False):
+    """Reject sharded exports until a collective full-parameter exporter exists."""
+    head = getattr(model, "optical_flow_aux", None)
+    flow_enabled = flow_enabled or head is not None or getattr(getattr(model, "optical_flow_config", None), "enabled", False)
+    if not flow_enabled:
+        return
+    if config is None and accelerator is not None:
+        plugin = getattr(getattr(accelerator, "state", None), "deepspeed_plugin", None)
+        config = getattr(plugin, "deepspeed_config", None)
+    zero = (config or {}).get("zero_optimization", {})
+    stage = zero.get("stage", 0) if isinstance(zero, dict) else zero
+    partitioned = head is not None and any(hasattr(p, "ds_id") for p in head.parameters())
+    if str(stage) == "3" or partitioned:
+        raise RuntimeError("Optical Flow does not support DeepSpeed ZeRO-3: full-parameter gather/export "
+                           "is not implemented; refusing partitioned weights. Use ZeRO-2 or non-ZeRO.")
+    if str(stage) not in {"0", "2"}:
+        raise RuntimeError(f"Optical Flow does not support ZeRO stage {stage!r}; use ZeRO-2 or non-ZeRO.")
+
+
+def json_hash(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def module_checksum(module):
+    digest = hashlib.sha256()
+    for name, value in sorted(module.state_dict().items()):
+        digest.update(name.encode())
+        digest.update(value.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
+def read_flow_artifacts(directory):
+    root = Path(directory)
+    config_path, weight_path = root / CONFIG_NAME, root / WEIGHTS_NAME
+    if not config_path.exists():
+        if weight_path.exists():
+            raise ValueError("OF weights exist without OF configuration")
+        metadata_path = root / "zr0_checkpoint_metadata.json"
+        if metadata_path.is_file() and json.loads(metadata_path.read_text()).get("training_stage") is not None:
+            raise ValueError("staged checkpoint is missing its OF configuration sidecar")
+        return None
+    payload = json.loads(config_path.read_text())
+    if payload.get("version") != 1 or payload.get("config_sha256") != json_hash(payload["config"]):
+        raise ValueError("OF config hash/version mismatch")
+    config = OpticalFlowConfig(**payload["config"]).validate()
+    resolve_stage(payload["training_stage"], flow=config, slot_aux_type=payload["slot_aux_type"])
+    if payload["slot_loss_computed"] is not False:
+        raise ValueError("Slot loss is not implemented")
+    stage_state = read_stage_training_state(payload, config)
+    metadata_path = root / "zr0_checkpoint_metadata.json"
+    if metadata_path.is_file():
+        metadata = json.loads(metadata_path.read_text())
+        if "stage_metadata_version" in payload or "stage_metadata_version" in metadata:
+            compared_keys = stage_state.keys() if payload.get("stage_metadata_version") == 2 else stage_state.keys() & payload.keys()
+            if any(key not in metadata or type(metadata[key]) is not type(payload.get(key))
+                   or metadata[key] != payload.get(key) for key in compared_keys):
+                raise ValueError("ordinary checkpoint and OF sidecar stage metadata mismatch")
+    payload.update(stage_state)
+    if config.enabled:
+        if not weight_path.is_file():
+            raise ValueError("OF configuration exists without OF weights")
+        if hashlib.sha256(weight_path.read_bytes()).hexdigest() != payload["weights_sha256"]:
+            raise ValueError("OF weights hash mismatch")
+    elif weight_path.exists():
+        raise ValueError("disabled OF checkpoint contains OF weights")
+    from model.difference_query import _read_checkpoint_query_data
+    query = _read_checkpoint_query_data(root)
+    if config.enabled:
+        if query is None or not query.enabled:
+            raise ValueError("OF checkpoint requires complete enabled Difference Query artifacts")
+        if config.num_flow_queries > query.num_difference_queries:
+            raise ValueError("OF query count exceeds checkpoint Difference Query count")
+        from safetensors import safe_open
+        with safe_open(str(weight_path), framework="pt", device="cpu") as tensors:
+            shape = tensors.get_slice("input_projection.weight").get_shape()
+        if shape[1] != query.hidden_size:
+            raise ValueError("OF / Difference Query hidden size mismatch")
+    return payload
+
+
+def resolve_flow_checkpoint(directory, requested=None, *, explicit_fields=None, stage=None, resume=False):
+    payload = read_flow_artifacts(directory) if directory else None
+    if payload is None:
+        if resume and stage is not None:
+            raise ValueError("new-stage resume requires stage/OF checkpoint metadata")
+        return (requested or OpticalFlowConfig()).validate(), None
+    saved = OpticalFlowConfig(**payload["config"])
+    if resume and payload["training_stage"] != stage:
+        raise ValueError("resume_from_checkpoint requires the same training_stage")
+    if requested is None:
+        return saved, payload
+    fields = set(requested.to_dict()) if explicit_fields is None else set(explicit_fields)
+    for name in fields:
+        if saved.enabled and getattr(requested, name) != getattr(saved, name):
+            raise ValueError(f"explicit OF config conflicts with checkpoint: {name}")
+    merged = saved.to_dict() if saved.enabled else requested.to_dict()
+    if saved.enabled:
+        merged.update({name: getattr(requested, name) for name in fields})
+    return OpticalFlowConfig(**merged).validate(), payload
+
+
+def save_flow_artifacts(model, directory):
+    reject_flow_zero3(model=model)
+    root = Path(directory)
+    config = model.optical_flow_config
+    stage_state = checkpoint_stage_metadata(model)
+    weight_path = root / WEIGHTS_NAME
+    if model.optical_flow_aux is not None:
+        save_file(model.optical_flow_aux.state_dict(), str(weight_path))
+    elif weight_path.exists():
+        weight_path.unlink()
+    payload = {"version": 1, **stage_state,
+               "slot_aux_type": "none",
+               "config": config.to_dict(), "config_sha256": json_hash(config.to_dict()),
+               "weights_sha256": hashlib.sha256(weight_path.read_bytes()).hexdigest() if config.enabled else None,
+               "initialization": getattr(model, "aux_initialization", {})}
+    (root / CONFIG_NAME).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def load_flow_weights(head, directory, payload):
+    if payload and payload["config"]["optical_flow_aux_type"] != "none":
+        if head is None:
+            raise ValueError("cannot discard a saved OF head during training")
+        head.load_state_dict(load_file(str(Path(directory) / WEIGHTS_NAME)), strict=True)

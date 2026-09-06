@@ -42,6 +42,7 @@ from utils.dataset_spec import (
     ResolvedDatasetSpec,
     resolve_dataset_spec,
     resolve_objective_requirements,
+    qwen_image_input_contract,
 )
 from utils.training_tokenization import (
     DatasetIntegrityError,
@@ -236,8 +237,9 @@ def prepare_qwen_vl_inputs_cpu(
 ):
     identity = f"dataset_entry={dataset_entry} {sample_id}".strip()
     to_pil = ToPILImage()
-    resized_height = 224
-    resized_width = 224
+    vision_contract = qwen_image_input_contract()
+    resized_height = vision_contract["image_height"]
+    resized_width = vision_contract["image_width"]
 
     # store contextual images (history + current)
     context_images = []
@@ -692,9 +694,16 @@ def build_concat_streaming_dataset(
     loss_type: str = "vlm_and_action",
     max_length: int = 1200,
     dataset_sample_ratios: list[float] | None = None,
+    optical_flow_config=None,
+    optical_flow_data_root=None,
+    optical_flow_manifest=None,
 ):
     if dataset_sample_ratios is not None and len(dataset_sample_ratios) != len(dataset_entries):
         raise ValueError("dataset_sample_ratios must have the same length as dataset_entries")
+    if optical_flow_config is not None and optical_flow_config.enabled and not any(
+        DATASET2FEATURE.get(name, {}).get("dataset_adapter") == "stage06_libero_flow" for name in dataset_entries
+    ):
+        raise ValueError("enabled OF requires a stage06_libero_flow dataset entry")
     selected_entries = []
     needs_fast = False
     for dataset_id, dataset_entry in enumerate(dataset_entries):
@@ -702,6 +711,14 @@ def build_concat_streaming_dataset(
             raise ValueError(f"Unknown dataset entry {dataset_entry!r}")
         entry = dict(DATASET2FEATURE[dataset_entry])
         entry["dataset_entry"] = dataset_entry
+        if entry.get("dataset_adapter") == "stage06_libero_flow":
+            if optical_flow_config is None or not optical_flow_config.enabled:
+                raise ValueError("stage06_flow dataset requires explicitly enabled OF")
+            if window_size != 1:
+                raise ValueError("stage06_flow requires window_size=1")
+            entry.update(optical_flow_data_root=optical_flow_data_root,
+                         optical_flow_manifest=optical_flow_manifest,
+                         flow_delta_frames=optical_flow_config.flow_delta_frames)
         if dataset_sample_ratios is not None:
             entry["sample_ratio"] = dataset_sample_ratios[dataset_id]
         sample_ratio = entry.get("sample_ratio")
@@ -781,7 +798,10 @@ def build_concat_streaming_dataset(
                     v2_metadata=lerobot_dataset.meta,
                 )
             else:
-                if adapter_name == "stage05_mixed_pretraining":
+                if adapter_name == "stage06_libero_flow":
+                    from utils.stage06_dataset import Stage06LiberoDataset
+                    adapter_factory = Stage06LiberoDataset
+                elif adapter_name == "stage05_mixed_pretraining":
                     from utils.stage05_dataset import Stage05MixedPretrainingDataset
 
                     adapter_factory = Stage05MixedPretrainingDataset
@@ -872,6 +892,15 @@ def custom_collate_fn(batch):
     if any('labels' in item for item in batch):
         keys.add('labels')
     result = {}
+    flow_keys = {key for item in batch for key in item if key.startswith("flow_")}
+    if flow_keys:
+        for key in flow_keys:
+            if key in {"flow_target", "flow_valid_mask"}:
+                result[key] = {index: item[key] for index, item in enumerate(batch) if item.get(key) is not None}
+            else:
+                default = torch.tensor(False) if key == "flow_supervision_available" else torch.tensor(-1)
+                result[key] = torch.stack([item.get(key, default) for item in batch])
+        keys -= flow_keys
     for key in keys:
         if key in metadata_keys:
             result[key] = [item[key] for item in batch]

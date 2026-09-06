@@ -1,0 +1,77 @@
+{
+  "checkpoint": "/opt/data/private/lq/ZR-0/outputs/pretrain/tabletop_v3_dq32_ar_gbs128_seed42_mbs16_gas2/step-7284",
+  "code_commit": "65d6a7d8342d15a07eea2177fe3ff3edb1d5ab84",
+  "data_audit": {
+    "episodes": 1693,
+    "frames": 273465,
+    "manifest_sha256": "0a39a44943bf22edc8501419d5cb8f39e31117bb23c86c1c4c48030f045d5c26"
+  },
+  "device": "cpu",
+  "ended": "2026-09-06T06:05:00.765309+00:00",
+  "nan_oom_or_interruption": false,
+  "overfit": {
+    "beats_zero_baseline": true,
+    "config": {
+      "flow_cell_min_valid_fraction": 0.5,
+      "flow_delta_frames": 10,
+      "flow_grid_size": 14,
+      "flow_head_hidden_dim": 32,
+      "flow_head_num_heads": 8,
+      "flow_head_num_layers": 1,
+      "flow_init_seed": 42,
+      "flow_loss_epsilon": 0.001,
+      "flow_motion_loss_weight": 1.0,
+      "flow_motion_threshold": 0.01,
+      "flow_target_resolution": 56,
+      "num_flow_queries": 2,
+      "optical_flow_aux_type": "dense_regression_v1",
+      "optical_flow_loss_weight": 1.0
+    },
+    "epe_decreased": true,
+    "final": {
+      "flow_epe_sum": 0.004192359279841185,
+      "flow_zero_epe_sum": 0.010078426450490952,
+      "optical_flow_loss_sum": 0.01321541063953191
+    },
+    "initial": {
+      "flow_epe_sum": 0.025034420657902956,
+      "flow_zero_epe_sum": 0.010078426450490952,
+      "optical_flow_loss_sum": 0.13621580973267555
+    },
+    "minimum_loss": 0.012992615811526775,
+    "sample_presentations": 5120,
+    "samples": 16,
+    "steps": 320
+  },
+  "real_initialization": {
+    "action_expert_absent": true,
+    "action_expert_init_seed": 42,
+    "action_expert_source": "random_or_absent",
+    "after": {
+      "query": "fd21525962e6e81ac0a7fa3a02d63377574719ea7d2653a1e43380bf83135e97",
+      "vlm": "64a2149ed071dd36032507b911d87cfa295e682018b6eb5ef41b31ff8182f03f"
+    },
+    "before": {
+      "query": "fd21525962e6e81ac0a7fa3a02d63377574719ea7d2653a1e43380bf83135e97",
+      "vlm": "64a2149ed071dd36032507b911d87cfa295e682018b6eb5ef41b31ff8182f03f"
+    },
+    "exact_query": true,
+    "exact_vlm_tensors": 625,
+    "flow_source": "random",
+    "head_parameters": {
+      "grid": 50176,
+      "submodules": {
+        "input_norm": 4096,
+        "input_projection": 524544,
+        "layers": 1579520,
+        "output": 4610,
+        "refinement": 590592
+      },
+      "total": 2753538,
+      "trainable": 2753538
+    },
+    "source": "outputs/pretrain/tabletop_v3_dq32_ar_gbs128_seed42_mbs16_gas2/step-7284"
+  },
+  "seed": 42,
+  "started": "2026-09-06T06:03:55.731500+00:00"
+}

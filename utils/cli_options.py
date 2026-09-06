@@ -1,6 +1,7 @@
 import argparse
 import math
 import sys
+from utils.optical_flow_config import OpticalFlowConfig, STAGES, resolve_stage
 
 
 def _add_difference_query_options(parser: argparse.ArgumentParser) -> None:
@@ -29,6 +30,14 @@ def _add_difference_query_options(parser: argparse.ArgumentParser) -> None:
 
 def build_train_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--training_stage", choices=tuple(STAGES), default=None)
+    parser.add_argument("--slot_aux_type", default="none")
+    parser.add_argument("--init_from_checkpoint")
+    parser.add_argument("--resume_from_checkpoint")
+    parser.add_argument("--optical_flow_data_root")
+    parser.add_argument("--optical_flow_manifest", default="manifest.2849ed69240ad542.jsonl")
+    for name, field in OpticalFlowConfig.__dataclass_fields__.items():
+        parser.add_argument("--" + name, type=(int if name == "num_flow_queries" else type(field.default)), default=field.default)
     parser.add_argument(
         "--vlm_name_or_path", type=str, help="file path of pretrained VLM"
     )
@@ -174,7 +183,7 @@ def build_train_parser() -> argparse.ArgumentParser:
         "--loss_type",
         type=str,
         default="vlm_and_action",
-        help="support [vlm_and_action, vlm, action]",
+        help="support [vlm_and_action, vlm, action]; aux only with stage2_aux",
     )
     parser.add_argument(
         "--vlm_loss_weight",
@@ -304,6 +313,47 @@ def parse_train_options(args=None) -> argparse.Namespace:
     parser = build_train_parser()
     raw_args = list(sys.argv[1:] if args is None else args)
     options = parser.parse_args(raw_args)
+    explicit = {token[2:].split("=", 1)[0] for token in raw_args if token.startswith("--")}
+    options.loss_type_explicit = "loss_type" in explicit
+    options.optical_flow_explicit_fields = sorted(explicit & OpticalFlowConfig.__dataclass_fields__.keys())
+    try:
+        if options.init_from_checkpoint and (options.resume_from_checkpoint or options.resume_training):
+            raise ValueError("init_from_checkpoint and resume are mutually exclusive")
+        source = options.init_from_checkpoint or options.resume_from_checkpoint
+        if source:
+            if options.vlm_name_or_path and options.vlm_name_or_path != source:
+                raise ValueError("checkpoint initialization path conflicts with vlm_name_or_path")
+            options.vlm_name_or_path = source
+        if options.resume_from_checkpoint:
+            options.resume_training = True
+            if options.action_expert_name_or_path and options.action_expert_name_or_path != source:
+                raise ValueError("resume requires the same checkpoint for all model weights")
+        flow = OpticalFlowConfig(**{name: getattr(options, name) for name in OpticalFlowConfig.__dataclass_fields__})
+        if options.training_stage is not None:
+            from utils.optical_flow_checkpoint import resolve_flow_checkpoint
+            flow, _ = resolve_flow_checkpoint(source, flow, explicit_fields=options.optical_flow_explicit_fields,
+                                              stage=options.training_stage, resume=options.resume_training)
+            for name, value in flow.to_dict().items():
+                setattr(options, name, value)
+        options.loss_type = resolve_stage(options.training_stage,
+            options.loss_type if options.loss_type_explicit or options.training_stage is None else None,
+            flow=flow, slot_aux_type=options.slot_aux_type)
+        if options.training_stage in {"stage1_ar", "stage2_aux"}:
+            if options.tune_action_expert or options.action_expert_name_or_path:
+                raise ValueError("stage1/stage2 forbid Action Expert training or weight source")
+            if "action_expert_loss_weight" in explicit and options.action_expert_loss_weight != 0:
+                raise ValueError("stage1/stage2 forbid explicit FM loss weight")
+            options.action_expert_loss_weight = 0.0
+        if options.training_stage == "stage2_aux":
+            if "vlm_loss_weight" in explicit and options.vlm_loss_weight != 0:
+                raise ValueError("stage2_aux forbids explicit AR loss weight")
+            options.vlm_loss_weight = 0.0
+        if options.training_stage == "stage3_joint" and not options.tune_action_expert:
+            raise ValueError("stage3_joint requires --tune_action_expert")
+        if flow.enabled and (not options.optical_flow_data_root or options.window_size != 1):
+            raise ValueError("OF training requires optical_flow_data_root and window_size=1")
+    except (ValueError, NotImplementedError) as error:
+        parser.error(str(error))
     if options.checkpoint_load_purpose == "stage05_ar_resume" and (
         not options.resume_training or options.loss_type != "vlm"
     ):
@@ -348,8 +398,8 @@ def parse_train_options(args=None) -> argparse.Namespace:
         or options.wandb_finish_timeout_seconds <= 0
     ):
         parser.error("--wandb_finish_timeout_seconds must be finite and positive")
-    if options.loss_type not in {"vlm", "action", "vlm_and_action"}:
-        parser.error("--loss_type must be one of [vlm, action, vlm_and_action]")
+    if options.loss_type not in {"vlm", "action", "vlm_and_action", "aux"}:
+        parser.error("--loss_type must be one of [vlm, action, vlm_and_action, aux (stage2_aux only)]")
     if options.loss_type == "vlm":
         if not options.tune_vlm:
             parser.error("--loss_type vlm requires --tune_vlm")
