@@ -1,4 +1,5 @@
 import argparse
+import json
 import math
 import sys
 from utils.optical_flow_config import OpticalFlowConfig, STAGES, resolve_stage
@@ -32,6 +33,13 @@ def build_train_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--training_stage", choices=tuple(STAGES), default=None)
     parser.add_argument("--slot_aux_type", default="none")
+    from utils.slot_config import SlotConfig
+    parser.add_argument("--slot_supervision_dir")
+    parser.add_argument("--aux_dataset_config", help="Versioned per-dataset auxiliary artifact paths")
+    for name, value in SlotConfig().to_dict().items():
+        if name == "slot_aux_type":
+            continue
+        parser.add_argument("--" + name, type=json.loads if isinstance(value, dict) else type(value), default=value)
     parser.add_argument("--init_from_checkpoint")
     parser.add_argument("--resume_from_checkpoint")
     parser.add_argument("--optical_flow_data_root")
@@ -316,6 +324,8 @@ def parse_train_options(args=None) -> argparse.Namespace:
     explicit = {token[2:].split("=", 1)[0] for token in raw_args if token.startswith("--")}
     options.loss_type_explicit = "loss_type" in explicit
     options.optical_flow_explicit_fields = sorted(explicit & OpticalFlowConfig.__dataclass_fields__.keys())
+    from utils.slot_config import SlotConfig, resolve_query_layout
+    options.slot_explicit_fields = sorted(explicit & SlotConfig.__dataclass_fields__.keys())
     try:
         if options.init_from_checkpoint and (options.resume_from_checkpoint or options.resume_training):
             raise ValueError("init_from_checkpoint and resume are mutually exclusive")
@@ -329,15 +339,35 @@ def parse_train_options(args=None) -> argparse.Namespace:
             if options.action_expert_name_or_path and options.action_expert_name_or_path != source:
                 raise ValueError("resume requires the same checkpoint for all model weights")
         flow = OpticalFlowConfig(**{name: getattr(options, name) for name in OpticalFlowConfig.__dataclass_fields__})
+        from utils.slot_checkpoint import resolve_slot_checkpoint
+        slot, _ = resolve_slot_checkpoint(source if options.training_stage else None,
+            SlotConfig(**{name: getattr(options, name) for name in SlotConfig.__dataclass_fields__}),
+            explicit_fields=options.slot_explicit_fields, resume=options.resume_training,
+            stage=options.training_stage, initialize=bool(options.init_from_checkpoint))
+        for name, value in slot.to_dict().items():
+            setattr(options, name, value)
         if options.training_stage is not None:
             from utils.optical_flow_checkpoint import resolve_flow_checkpoint
             flow, _ = resolve_flow_checkpoint(source, flow, explicit_fields=options.optical_flow_explicit_fields,
-                                              stage=options.training_stage, resume=options.resume_training)
+                                              stage=options.training_stage, resume=options.resume_training,
+                                              initialize=bool(options.init_from_checkpoint))
             for name, value in flow.to_dict().items():
                 setattr(options, name, value)
         options.loss_type = resolve_stage(options.training_stage,
             options.loss_type if options.loss_type_explicit or options.training_stage is None else None,
-            flow=flow, slot_aux_type=options.slot_aux_type)
+            flow=flow, slot=slot)
+        if slot.enabled:
+            if not options.resume_training and not options.init_from_checkpoint:
+                raise ValueError("Slot stages require init_from_checkpoint or same-stage resume")
+            if options.training_stage == "stage3_joint":
+                options.tune_vlm = True
+            from model.difference_query import resolve_difference_query_config
+            query = resolve_difference_query_config(options.vlm_name_or_path, None,
+                use_difference_query=options.use_difference_query, num_difference_queries=options.num_difference_queries,
+                vlm_attention_backend=options.vlm_attention_backend)
+            resolve_query_layout(query.num_difference_queries, flow.num_flow_queries, slot_enabled=True, query_enabled=query.enabled)
+            if not options.slot_supervision_dir or options.window_size != 1:
+                raise ValueError("Slot requires slot_supervision_dir and window_size=1")
         if options.training_stage in {"stage1_ar", "stage2_aux"}:
             if options.tune_action_expert or options.action_expert_name_or_path:
                 raise ValueError("stage1/stage2 forbid Action Expert training or weight source")

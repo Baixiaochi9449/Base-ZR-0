@@ -124,6 +124,12 @@ def _repository_implementation_identity(repository_root: Path = ROOT) -> dict[st
     return {"dependencies": records, "sha256": canonical_json_hash(records)}
 
 
+def _validate_ar_compatibility_identity(report_identity: dict[str, Any], repository_root: Path) -> bool:
+    """Accept only the complete, reviewed pair of historical/current identities."""
+    from utils.stage05_compatibility import verified_legacy_identity
+    return verified_legacy_identity(report_identity, _repository_implementation_identity(repository_root), "ar_tokenization")
+
+
 def _processor_files(processor_path: Path) -> list[dict[str, Any]]:
     paths = [
         processor_path / name
@@ -239,7 +245,9 @@ def _read_sidecar_identity(
     if manifest.get("generator_identity") != generator_identity(
         repository_root=repository_root, build_joint=False
     ):
-        raise _audit_error(f"{key} AR sidecar generator identity changed")
+        from utils.stage05_compatibility import verified_legacy_identity
+        if not verified_legacy_identity(manifest.get("generator_identity"), generator_identity(repository_root=repository_root, build_joint=False), "ar_generator"):
+            raise _audit_error(f"{key} AR sidecar generator identity changed")
     eligible_path = sidecar_path / "ar_indices.npy"
     eligible_hash = sha256_file(eligible_path)
     if manifest.get("files", {}).get("ar_indices.npy") != eligible_hash:
@@ -424,11 +432,15 @@ def validate_token_audit(
         current_runtime_files,
         "processor runtime source files",
     )
-    _compare_identity(
-        report["implementation_identity"],
-        _repository_implementation_identity(repository_root),
-        "production tokenization implementation",
-    )
+    try:
+        _compare_identity(report["implementation_identity"],
+                          _repository_implementation_identity(repository_root),
+                          "production tokenization implementation")
+    except ValueError:
+        # Explicit legacy AR contract: only the auxiliary registration files
+        # may differ; tokenization source remains byte-for-byte verified.
+        if not _validate_ar_compatibility_identity(report["implementation_identity"], repository_root):
+            raise
 
     vision = report["vision_contract"]
     if (

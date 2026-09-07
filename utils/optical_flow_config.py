@@ -5,7 +5,7 @@ import math
 
 
 STAGES = {"stage1_ar": "vlm", "stage2_aux": "aux", "stage3_joint": "vlm_and_action"}
-SLOT_AUX_REGISTRY = {"none": None}
+from utils.slot_config import SLOT_AUX_REGISTRY
 
 
 @dataclass(frozen=True)
@@ -62,13 +62,17 @@ class OpticalFlowConfig:
         return self
 
 
-def resolve_stage(training_stage, loss_type=None, *, flow=None, slot_aux_type="none"):
+def resolve_stage(training_stage, loss_type=None, *, flow=None, slot_aux_type="none", slot=None):
     flow = (flow or OpticalFlowConfig()).validate()
+    if slot is not None:
+        from utils.aux_objectives import validate_stage_objectives
+        validate_stage_objectives(training_stage, slot, flow)
+        slot_aux_type = slot.slot_aux_type
     if slot_aux_type not in SLOT_AUX_REGISTRY:
-        raise NotImplementedError("Slot not implemented: " + slot_aux_type)
+        raise NotImplementedError("unregistered Slot auxiliary type: " + slot_aux_type)
     if training_stage is None:
-        if flow.enabled:
-            raise ValueError("OF training requires an explicit training_stage")
+        if flow.enabled or slot_aux_type != "none":
+            raise ValueError("auxiliary training requires an explicit training_stage")
         if loss_type not in {None, "vlm", "action", "vlm_and_action"}:
             raise ValueError("loss_type must be vlm, action or vlm_and_action")
         return loss_type or "vlm_and_action"
@@ -77,21 +81,24 @@ def resolve_stage(training_stage, loss_type=None, *, flow=None, slot_aux_type="n
     expected = STAGES[training_stage]
     if loss_type is not None and loss_type != expected:
         raise ValueError(f"explicit loss_type={loss_type} conflicts with {training_stage}")
-    if training_stage == "stage1_ar" and flow.enabled:
+    if training_stage == "stage1_ar" and (flow.enabled or slot_aux_type != "none"):
         raise ValueError("stage1_ar only permits AR")
-    if training_stage == "stage2_aux" and not flow.enabled:
-        raise ValueError("stage2_aux requires dense_regression_v1 and positive OF weight")
+    if training_stage == "stage2_aux" and not flow.enabled and slot_aux_type == "none":
+        raise ValueError("stage2_aux requires enabled Slot or Flow with positive weight")
     return expected
 
 
-def stage_description(stage, flow):
-    return {"stage1_ar": "AR-only", "stage2_aux": "stage2 OF-only / Slot not implemented",
+def stage_description(stage, flow, slot_aux_type="none"):
+    if slot_aux_type != "none":
+        return {"stage2_aux": "Slot+OF" if flow.enabled else "Slot-only",
+                "stage3_joint": "AR+Slot+OF+FM" if flow.enabled else "AR+Slot+FM"}.get(stage)
+    return {"stage1_ar": "AR-only", "stage2_aux": "stage2 OF-only / Slot disabled",
             "stage3_joint": ("AR+FM+OF provisional joint" if flow.enabled else "AR+FM provisional joint")}.get(stage)
 
 
-def stage_loss_metadata(stage, *, ar=False, flow=False, fm=False):
+def stage_loss_metadata(stage, *, ar=False, flow=False, fm=False, slot=False, slot_enabled=False):
     if stage is None:
         return {}
-    return {"training_stage": stage, "provisional": stage == "stage3_joint",
-            "slot_loss_computed": False, "ar_loss_computed": bool(ar),
+    return {"training_stage": stage, "provisional": stage == "stage3_joint" and not slot_enabled,
+            "slot_loss_computed": bool(slot), "ar_loss_computed": bool(ar),
             "flow_loss_computed": bool(flow), "fm_loss_computed": bool(fm)}

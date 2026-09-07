@@ -1,0 +1,135 @@
+{
+  "classes": {
+    "Q2": {
+      "counts": [
+        8534,
+        55176,
+        35793,
+        27331,
+        9657,
+        2557,
+        6168
+      ],
+      "vocabulary": [
+        "align",
+        "approach",
+        "contact",
+        "manipulate",
+        "release",
+        "retract",
+        "transport"
+      ],
+      "weights": [
+        1.7290111198366558,
+        0.6799844779393333,
+        0.844257748872534,
+        0.9661539739802153,
+        1.6253728082652732,
+        3.1587026271833762,
+        2.0337704042087905
+      ]
+    },
+    "Q7": {
+      "counts": [
+        1250,
+        6648,
+        62621,
+        2089
+      ],
+      "vocabulary": [
+        "closed_to_open",
+        "maintain_closed",
+        "maintain_open",
+        "open_to_closed"
+      ],
+      "weights": [
+        4.974503360748518,
+        2.1570451208477013,
+        0.702821010108044,
+        3.848004002725232
+      ]
+    },
+    "Q8": {
+      "counts": [
+        704,
+        5948,
+        7874,
+        58082
+      ],
+      "vocabulary": [
+        "break_contact",
+        "establish_contact",
+        "maintain_contact",
+        "remain_separated"
+      ],
+      "weights": [
+        6.314156429921877,
+        2.1722819159552325,
+        1.8880085706395306,
+        0.6951537748703147
+      ]
+    }
+  },
+  "data_identity": "fd9545fe14cb48a091bbe76ebc532298cf3ac154ea96fb18d03a7131c2945e62",
+  "dataset_root": "/opt/data/private/lq/datasets/molmoact_dataset_tabletop-v3_stage05",
+  "q5_count": [
+    72608,
+    72608,
+    72608
+  ],
+  "q5_mean": [
+    [
+      -0.0029637000743720026,
+      0.001160481407007485,
+      -0.0042229025589466535
+    ],
+    [
+      -0.005791518069634233,
+      -0.002228384516857614,
+      0.016172769254076538
+    ],
+    [
+      -0.0028278179952622644,
+      -0.0033888659238651268,
+      0.020395671813023406
+    ]
+  ],
+  "q5_std": [
+    [
+      0.1556473675887989,
+      0.08565816825188731,
+      0.19778347274996827
+    ],
+    [
+      0.19127552163479758,
+      0.15242990268293527,
+      0.6522076720675695
+    ],
+    [
+      0.2423461680164629,
+      0.1709621559199352,
+      0.681367980426807
+    ]
+  ],
+  "rules": {
+    "camera": "first_view",
+    "class_weight": "sqrt_inverse_frequency_clip_ratio_then_train_label_mean_one",
+    "max_weight_ratio": 10.0,
+    "q5_order": [
+      "target",
+      "gripper",
+      "relative"
+    ],
+    "risk_range": [
+      0,
+      1
+    ],
+    "std_ddof": 0,
+    "std_floor_m": 0.001,
+    "time_alignment": "source_semantic_anchor_only"
+  },
+  "schema_version": "future_difference_training_v5",
+  "source_identity": "eda445e91bf905d4eb1f0559669526a75c895d6e721ecae60e399195c12f37f2",
+  "split": "train",
+  "version": 1
+}

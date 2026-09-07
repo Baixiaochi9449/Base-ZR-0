@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "basis": "00d611b; exact complete inventories; AR equivalence evidence in docs/structured_slot_review3.md",
+  "ar_generator": {
+    "historical": {
+      "dependencies": [
+        {
+          "relative_path": "utils/stage05_sidecar.py",
+          "sha256": "d8ff71b21a4f758cfa1ec8877b09cc4c8bb3536cb1d748793f489f6a558b7bca"
+        },
+        {
+          "relative_path": "utils/dataset_adapters.py",
+          "sha256": "c27f99c0f5255f4bc71a4a50ec0d9bfe9b76deb88444ce8fce3771fe41faed12"
+        },
+        {
+          "relative_path": "scripts/build_stage05_sidecars.py",
+          "sha256": "5cdb2417a5326992643f54c9073d5b529b7b44643118c532f6050f80760c1148"
+        }
+      ],
+      "scope": "ar_only",
+      "sha256": "55953e53c828a7ae31e3c9668755a18213db4d199a28bf8dcf17ad659be5d046"
+    },
+    "current": {
+      "scope": "ar_only",
+      "dependencies": [
+        {
+          "relative_path": "utils/stage05_sidecar.py",
+          "sha256": "7b26554931727ef299ca9e67aef71edf2c20cfb7bae70b899802fa2173062610"
+        },
+        {
+          "relative_path": "utils/dataset_adapters.py",
+          "sha256": "09bb2a8a2e750489eca0cf754f53b226e45098f3fcc5a21d8c0f1af8be905768"
+        },
+        {
+          "relative_path": "scripts/build_stage05_sidecars.py",
+          "sha256": "5cdb2417a5326992643f54c9073d5b529b7b44643118c532f6050f80760c1148"
+        }
+      ],
+      "sha256": "c5c1bae7a5e440750beffc222d7dda3d99462728a1d588ff11402b0f04698214"
+    }
+  },
+  "ar_tokenization": {
+    "historical": {
+      "dependencies": [
+        {
+          "path": "dataset2feature.yaml",
+          "sha256": "53a700689f34e80ee6136725570b4cbc33fa5340dfbc6e5b3866d451fc225690",
+          "size": 26892
+        },
+        {
+          "path": "scripts/audit_stage05_token_lengths.py",
+          "sha256": "040145a1b9102e85c41bc352cc285a61dbeeae7b92e7cf44f5443d9ededb987e",
+          "size": 31510
+        },
+        {
+          "path": "utils/dataset_adapters.py",
+          "sha256": "c27f99c0f5255f4bc71a4a50ec0d9bfe9b76deb88444ce8fce3771fe41faed12",
+          "size": 27353
+        },
+        {
+          "path": "utils/stage05_dataset.py",
+          "sha256": "3ad1a2dfcc77f2a443445b5712d01746751d45255721155d451fa500df949f52",
+          "size": 24774
+        },
+        {
+          "path": "utils/stage05_sidecar.py",
+          "sha256": "d8ff71b21a4f758cfa1ec8877b09cc4c8bb3536cb1d748793f489f6a558b7bca",
+          "size": 47748
+        },
+        {
+          "path": "utils/training_tokenization.py",
+          "sha256": "b77f09578ca7bf47c036569fed0e863214da8cac3709f3331a733d87c34d7aa8",
+          "size": 13869
+        }
+      ],
+      "sha256": "10180375e7a8e8980e0b43f67a5ac965badc6070531af33c66e639cce7c68660"
+    },
+    "current": {
+      "dependencies": [
+        {
+          "path": "dataset2feature.yaml",
+          "sha256": "57dd6d3e5f5595e436f30a9b01597fa3c56a1c53b988a0fb885dc4b3289c0cef",
+          "size": 28562
+        },
+        {
+          "path": "scripts/audit_stage05_token_lengths.py",
+          "sha256": "57eff6db897867ce5f89ce09204c591bdc8cb9ff62b9a7b4579f144ef5cbed59",
+          "size": 32468
+        },
+        {
+          "path": "utils/dataset_adapters.py",
+          "sha256": "09bb2a8a2e750489eca0cf754f53b226e45098f3fcc5a21d8c0f1af8be905768",
+          "size": 27360
+        },
+        {
+          "path": "utils/stage05_dataset.py",
+          "sha256": "c26316ce534fffb828b6c2b0dde31782a73a3192d2388cb7e9a9985a95076dfa",
+          "size": 27483
+        },
+        {
+          "path": "utils/stage05_sidecar.py",
+          "sha256": "7b26554931727ef299ca9e67aef71edf2c20cfb7bae70b899802fa2173062610",
+          "size": 47974
+        },
+        {
+          "path": "utils/training_tokenization.py",
+          "sha256": "b77f09578ca7bf47c036569fed0e863214da8cac3709f3331a733d87c34d7aa8",
+          "size": 13869
+        }
+      ],
+      "sha256": "f302e385462727fd646cb68b4c39bba880a3007aa53f5f5208a4eca0dd6eb82f"
+    }
+  }
+}

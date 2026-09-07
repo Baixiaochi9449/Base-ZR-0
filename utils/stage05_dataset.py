@@ -166,11 +166,11 @@ class Stage05MixedPretrainingDataset(torch.utils.data.Dataset):
                 "Stage05 mixed adapter requires a positive integer action horizon "
                 "and padded dimension=64"
             )
-        if loss_type not in {"vlm", "vlm_and_action"}:
+        if loss_type not in {"vlm", "vlm_and_action", "aux"}:
             raise ValueError("Stage05 mixed adapter supports AR-only or Joint training")
         self.entry = dict(entry)
         self.root = Path(entry["dataset_path"]).resolve()
-        sidecar_field = "ar_sidecar_path" if loss_type == "vlm" else "joint_sidecar_path"
+        sidecar_field = "ar_sidecar_path" if loss_type in {"vlm", "aux"} else "joint_sidecar_path"
         self.sidecar_root = Path(entry.get(sidecar_field, entry.get("sidecar_path", ""))).resolve()
         self.processor = processor
         self.loss_type = loss_type
@@ -178,6 +178,7 @@ class Stage05MixedPretrainingDataset(torch.utils.data.Dataset):
         self.action_horizon = action_horizon
         self.max_pad_length = max_pad_state_and_action_length
         self.dataset_id = int(dataset_id)
+        self.aux_dataset_identity = entry.get("aux_dataset_identity")
         self.kind = str(entry["stage05_kind"])
         self.embedded_images = bool(entry["embedded_images"])
         self.video_backend = str(entry.get("video_backend", "pyav"))
@@ -211,12 +212,16 @@ class Stage05MixedPretrainingDataset(torch.utils.data.Dataset):
         expected_dataset_id = str(entry.get("stats_key") or "")
         if expected_dataset_id and self.manifest["dataset_id"] != expected_dataset_id:
             raise ValueError("Stage05 sidecar dataset/stats identity mismatch")
-        index_name = "ar_indices.npy" if loss_type == "vlm" else "joint_indices.npy"
+        index_name = "ar_indices.npy" if loss_type in {"vlm", "aux"} else "joint_indices.npy"
         if index_name not in self.manifest["files"]:
             raise ValueError(f"Stage05 sidecar does not support {loss_type}: {self.sidecar_root}")
         self.indices = np.load(self.sidecar_root / index_name, mmap_mode="r", allow_pickle=False)
         self.episodes = pq.read_table(self.sidecar_root / "episodes.parquet").to_pylist()
         self.episodes.sort(key=lambda row: int(row["dataset_from_index"]))
+        if loss_type == "aux":
+            packed = np.load(self.sidecar_root / "validity_packed.npy", mmap_mode="r", allow_pickle=False)
+            main_valid = np.unpackbits(packed[:, 0])[:self.manifest["counts"]["source_frames"]]
+            self.indices = np.flatnonzero(main_valid)
         self.episode_by_id = {
             int(row["episode_index"]): row for row in self.episodes
         }
@@ -227,6 +232,23 @@ class Stage05MixedPretrainingDataset(torch.utils.data.Dataset):
             [int(row["dataset_to_index"]) for row in self.episodes], dtype=np.int64
         )
         self.source_episode_metadata = self._load_source_episode_metadata()
+        self.flow_reader = None
+        if entry.get("flow_enabled", False):
+            from utils.optical_flow_reader import OpticalFlowReader
+            from utils.aux_data_contract import flow_contract
+            flow_root = entry.get("optical_flow_data_root")
+            if not flow_root:
+                raise ValueError(f"{entry['dataset_entry']}: flow manifest has no data root")
+            self.flow_reader = OpticalFlowReader(
+                flow_root, entry["optical_flow_manifest"],
+                delta_frames=int(entry.get("flow_delta_frames", 20)),
+                contract=flow_contract(entry),
+            )
+            if self.flow_reader.camera_key not in tuple(entry["camera_keys"]):
+                raise ValueError(
+                    f"{entry['dataset_entry']}: flow camera {self.flow_reader.camera_key!r} "
+                    "is absent from the supervised input views"
+                )
         self._parquet_cache: OrderedDict[Path, Any] = OrderedDict()
         self._episode_rows_cache: OrderedDict[int, list[dict[str, Any]]] = OrderedDict()
         self._canonical_cache: OrderedDict[int, tuple] = OrderedDict()
@@ -256,6 +278,18 @@ class Stage05MixedPretrainingDataset(torch.utils.data.Dataset):
             str(entry["dataset_entry"]), entry, action_horizon=action_horizon, window_size=1,
             requirements=self.requirements,
         )
+        if self.flow_reader is not None:
+            from utils.aux_data_contract import public_flow_contract
+            self.spec = replace(self.spec, auxiliary_contract={"flow": public_flow_contract(self.flow_reader.contract)})
+            if loss_type == "aux" and not entry.get("slot_enabled", False):
+                from utils.aux_sampling import load_flow_candidates
+                self.unfiltered_length = len(self.indices)
+                self.indices = np.intersect1d(self.indices, load_flow_candidates(self), assume_unique=True)
+                from utils.aux_data_contract import digest_file
+                auxiliary = dict(self.spec.auxiliary_contract)
+                auxiliary["sampling"] = {"flow_candidates_sha256": digest_file(entry["flow_candidate_index"]),
+                    "unfiltered_length": self.unfiltered_length, "filtered_length": len(self.indices)}
+                self.spec = replace(self.spec, auxiliary_contract=auxiliary)
         self.spec = replace(
             self.spec,
             vision_input_contract=resolve_stage05_vision_contract(
@@ -293,6 +327,10 @@ class Stage05MixedPretrainingDataset(torch.utils.data.Dataset):
         del epoch
 
     def sampling_group_ranges(self) -> list[tuple[int, int]]:
+        if self.loss_type == "aux":
+            boundaries = np.searchsorted(self.indices, self.episode_stops)
+            starts = np.concatenate(([0], boundaries[:-1]))
+            return [(int(a), int(b)) for a, b in zip(starts, boundaries) if b > a]
         result = []
         cursor = 0
         count_key = (
@@ -500,7 +538,7 @@ class Stage05MixedPretrainingDataset(torch.utils.data.Dataset):
         row = rows[base]
         identity = f"dataset={self.spec.dataset_entry} episode={episode} frame={base} index={global_index}"
         target = None
-        if _is_nonempty(row.get("train_data")):
+        if self.loss_type != "aux" and _is_nonempty(row.get("train_data")):
             try:
                 target = canonicalize_future_difference_target(row["train_data"], identity)
             except ValueError:
@@ -531,8 +569,11 @@ class Stage05MixedPretrainingDataset(torch.utils.data.Dataset):
         # are collated as metadata lists and are never consumed by either loss.
         result["task"] = str(episode_meta["task"])
         result["train_data"] = target
-        result["slot_data"] = row.get("slot_data")
+        if self.loss_type != "aux":
+            result["slot_data"] = row.get("slot_data")
         result["stats_key"] = str(self.entry.get("stats_key") or "")
+        if self.flow_reader is not None:
+            result.update(self.flow_reader.read(episode, int(row["frame_index"])))
         return result
 
     def __getitem__(self, index: int):

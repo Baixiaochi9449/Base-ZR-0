@@ -44,7 +44,7 @@ FUTURE_DIFFERENCE_KEYS = (
     "Contact_interaction",
     "Object_constraints",
 )
-SUPPORTED_LOSS_TYPES = {"vlm", "action", "vlm_and_action"}
+SUPPORTED_LOSS_TYPES = {"vlm", "action", "vlm_and_action", "aux"}
 FUTURE_DIFFERENCE_IMAGE_SIZE = 224
 
 

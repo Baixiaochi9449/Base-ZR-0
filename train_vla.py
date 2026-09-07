@@ -252,7 +252,8 @@ def write_initialization_manifest(
     }
     if getattr(model, "training_stage", None):
         manifest.update(training_stage=model.training_stage, stage_description=model.stage_description,
-                        slot_aux_type="none", slot_loss_computed=False,
+                        slot_aux_type=model.slot_config.slot_aux_type, slot_loss_computed=False,
+                        slot_config=model.slot_config.to_dict(), query_role_layout=model.query_role_layout,
                         optical_flow_config=model.optical_flow_config.to_dict(),
                         optical_flow_initialization=model.aux_initialization)
     filename = (
@@ -460,29 +461,42 @@ def run_optimizer_step_window(
     collect_training_diagnostics: bool = False,
     optical_flow_config=None,
     training_stage=None,
+    slot_config=None,
 ):
     batches = list(batches)
     if not batches:
         raise ValueError("optimizer-step accumulation window must not be empty")
-    if loss_type == "aux" and (optical_flow_config is None or not optical_flow_config.enabled):
-        raise ValueError("aux optimizer windows require enabled Optical Flow configuration")
+    slot_enabled = slot_config is not None and slot_config.enabled
+    if loss_type == "aux" and not slot_enabled and (optical_flow_config is None or not optical_flow_config.enabled):
+        raise ValueError("aux optimizer windows require enabled Slot or Flow configuration")
+    vlm_loss_weight = ZR0Model._validate_loss_weight(vlm_loss_weight, "vlm_loss_weight",
+        required=loss_type in {"vlm", "vlm_and_action"})
+    action_expert_loss_weight = ZR0Model._validate_loss_weight(action_expert_loss_weight, "action_expert_loss_weight",
+        required=loss_type in {"action", "vlm_and_action"})
     if collect_training_diagnostics and accelerator.device.type == "cuda":
         torch.cuda.synchronize(accelerator.device)
     step_started = time.perf_counter()
     counts = global_supervision_counts(
         batches, loss_type=loss_type, accelerator=accelerator,
         optical_flow_config=optical_flow_config,
+        slot_config=slot_config,
     )
-    if loss_type == "aux" and counts.flow_samples.item() == 0:
+    activity = counts.activity_metrics(loss_type=loss_type, vlm_loss_weight=vlm_loss_weight,
+        action_expert_loss_weight=action_expert_loss_weight, optical_flow_config=optical_flow_config, slot_config=slot_config)
+    if not activity["active_supervision_available"]:
         from utils.optical_flow_config import stage_loss_metadata
         from utils.optimizer_step_loss import optimizer_step_result
-        return {**optimizer_step_result(applied=False, reason="no_supervision"),
-                "flow_eligible_samples": counts.flow_samples,
-                "flow_coverage": counts.flow_samples,
-                **stage_loss_metadata(training_stage or "stage2_aux")}
+        return {**optimizer_step_result(applied=False, reason="no_supervision"), **activity,
+                **({"flow_eligible_samples": counts.flow_samples, "flow_coverage": counts.flow_samples} if counts.flow_samples is not None else {}),
+                **({"slot_sample_coverage": counts.slot_covered_samples / counts.batch_samples.clamp_min(1),
+                    "slot_available": bool(counts.slot_samples.sum() > 0),
+                    **{f"slot_{q}_valid_count": counts.slot_samples[i] for i, q in enumerate(slot_config.slot_task_weights)},
+                    **{f"slot_{q}_available": bool(counts.slot_samples[i] > 0) for i, q in enumerate(slot_config.slot_task_weights)}} if slot_enabled else {}),
+                **stage_loss_metadata(training_stage or ("stage2_aux" if loss_type == "aux" else None), slot_enabled=slot_enabled)}
     from utils.optimizer_step_loss import OptimizerWindowStep
     step = OptimizerWindowStep(model=model, optimizer=optimizer, lr_scheduler=lr_scheduler, accelerator=accelerator)
     flow_sums = {}
+    slot_sums = {}
     accumulator = OptimizerStepMetricAccumulator(
         loss_type=loss_type,
         vlm_loss_weight=vlm_loss_weight,
@@ -539,7 +553,13 @@ def run_optimizer_step_window(
                     gradient_accumulation_steps=accelerator.gradient_accumulation_steps,
                     data_parallel_world_size=accelerator.num_processes,
                     optical_flow_loss_weight=(optical_flow_config.optical_flow_loss_weight if optical_flow_config else 0.0),
+                    slot_config=slot_config,
                 )
+                if slot_enabled:
+                    for key, value in outputs.items():
+                        if key.startswith("slot_") and isinstance(value, torch.Tensor) and key not in {"slot_loss_raw", "slot_loss_weighted"}:
+                            value = value.detach().float().to(accelerator.device)
+                            slot_sums[key] = slot_sums.get(key, torch.zeros_like(value)) + value
                 if optical_flow_config is not None and optical_flow_config.enabled:
                     for key in ("optical_flow_loss_sum", "flow_epe_sum", "flow_motion_epe_sum", "flow_zero_epe_sum",
                                 "flow_valid_fraction_sum", "flow_motion_fraction_sum", "flow_eligible_pixels_sum", "flow_batch_samples"):
@@ -565,6 +585,12 @@ def run_optimizer_step_window(
     step_result = step.finish()
     optimizer.zero_grad()
     metrics = accumulator.finalize(accelerator)
+    if slot_enabled:
+        from utils.slot_loss import finalize_slot_metrics
+        reduced = {key: accelerator.reduce(value, reduction="sum") for key, value in slot_sums.items()}
+        metrics.update(finalize_slot_metrics(reduced, counts.slot_samples, slot_config))
+        metrics["loss"] = metrics.get("loss", 0) + metrics.get("slot_loss_weighted", 0)
+        metrics["total_loss"] = metrics["loss"]
     if optical_flow_config is not None and optical_flow_config.enabled:
         reduced = {key: accelerator.reduce(value, reduction="sum") for key, value in flow_sums.items()}
         count = counts.flow_samples.clamp_min(1)
@@ -619,6 +645,7 @@ def run_optimizer_step_window(
                 gpu_peak_memory_reserved_gib=memory[1] / (1024**3),
             )
     metrics.update(diagnostic_metrics)
+    metrics.update(activity)
     metrics.update(step_result)
     if "training_stage" in metrics:
         from utils.optical_flow_checkpoint import record_stage_training_window
@@ -841,6 +868,15 @@ def train(opt):
     from utils.optical_flow_config import OpticalFlowConfig
     flow_config = OpticalFlowConfig(**{name: getattr(opt, name, field.default)
         for name, field in OpticalFlowConfig.__dataclass_fields__.items()})
+    from utils.slot_config import SlotConfig
+    for name, default in SlotConfig().to_dict().items():
+        if not hasattr(opt, name):
+            setattr(opt, name, default)
+    slot_config = SlotConfig(**{name: getattr(opt, name) for name in SlotConfig.__dataclass_fields__})
+    slot_reader = None
+    if slot_config.enabled:
+        from utils.slot_routing import load_slot_supervision
+        slot_reader = load_slot_supervision(opt.slot_supervision_dir)
     if getattr(opt, "resume_from_checkpoint", None) and opt.training_stage == "stage3_joint":
         opt.action_expert_name_or_path = opt.resume_from_checkpoint
 
@@ -888,7 +924,7 @@ def train(opt):
     if accelerator.distributed_type == DistributedType.DEEPSPEED:
         deepspeed_config = accelerator.state.deepspeed_plugin.deepspeed_config
         from utils.optical_flow_checkpoint import reject_flow_zero3
-        reject_flow_zero3(config=deepspeed_config, flow_enabled=flow_config.enabled)
+        reject_flow_zero3(config=deepspeed_config, flow_enabled=flow_config.enabled or slot_config.enabled)
         runtime_batch_config = {
             "gradient_accumulation_steps": opt.gradient_accumulation_steps,
             "train_micro_batch_size_per_gpu": opt.per_device_train_batch_size,
@@ -926,12 +962,16 @@ def train(opt):
         optical_flow_config=flow_config,
         optical_flow_data_root=getattr(opt, "optical_flow_data_root", None),
         optical_flow_manifest=getattr(opt, "optical_flow_manifest", None),
+        slot_config=slot_config,
+        slot_reader=slot_reader,
+        aux_dataset_config=getattr(opt, "aux_dataset_config", None),
     )
     resolved_dataset_manifest = concat_dataset.resolved_dataset_manifest
     seen_tracker = DatasetSeenTracker(
         concat_dataset,
         accelerator,
         resume_directory=opt.vlm_name_or_path if opt.resume_training else None,
+        flow_config=flow_config,
     )
     if accelerator.is_main_process:
         accelerator.print("resolved dataset manifest:")
@@ -1011,6 +1051,8 @@ def train(opt):
         loss_type=None if getattr(opt, "training_stage", None) else opt.loss_type,
         training_stage=getattr(opt, "training_stage", None),
         slot_aux_type=getattr(opt, "slot_aux_type", "none"),
+        slot_config=slot_config,
+        slot_supervision_stats=slot_reader.stats if slot_reader else None,
         optical_flow_config=flow_config,
         init_from_checkpoint=getattr(opt, "init_from_checkpoint", None),
         resume_from_checkpoint=getattr(opt, "resume_from_checkpoint", None),
@@ -1248,7 +1290,8 @@ def train(opt):
         # set the epoch into each dataset
         for ds in concat_dataset.datasets:
             ds.set_epoch(epoch)
-        epoch_sampler.set_epoch(epoch)
+        from utils.load_training_dataset import set_dataloader_epoch
+        set_dataloader_epoch(dataloader, epoch_sampler, epoch)
 
         if opt.resume_training and resume_epoch > epoch:
             accelerator.print("skip {}-th epoch".format(epoch))
@@ -1302,6 +1345,7 @@ def train(opt):
                 collect_training_diagnostics=collect_training_diagnostics,
                 optical_flow_config=flow_config,
                 training_stage=getattr(opt, "training_stage", None),
+                slot_config=slot_config,
             )
             if unwrapped is not None:
                 unwrapped.training_data_cursor = {"epoch": epoch, "batch_idx": indexed_window[-1][0] + 1}

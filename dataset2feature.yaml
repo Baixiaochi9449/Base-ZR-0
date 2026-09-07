@@ -69,6 +69,26 @@ stage05_droid_mixed:
   stats_key: stage05_droid
   use_quantile: true
   sample_ratio: 1.0
+
+stage05_droid_partial_mixed:
+  dataset_path: /opt/data/private/lq/datasets/droid_1.0.1_stage05_partial_9465_20260816
+  ar_sidecar_path: /opt/data/private/lq/ZR-0/outputs/structured_slots_v1_stage05/ar/droid
+  joint_sidecar_path: /opt/data/private/lq/outputs/structured_slots_v1_stage05/joint/droid
+  dataset_type: vla
+  dataset_adapter: stage05_mixed_pretraining
+  stage05_kind: droid
+  embedded_images: false
+  video_backend: pyav
+  target_text_field: train_data
+  camera_keys:
+    - observation.images.exterior_1_left
+    - observation.images.wrist_left
+  stats_key: stage05_droid
+  use_quantile: true
+  sample_ratio: 1.0
+  optical_flow_data_root: /opt/data/private/lq/datasets/droid_1.0.1_stage05_partial_9465_20260816/stage06_flow/droid
+  optical_flow_manifest: manifest.d76a6dd745045034.jsonl
+  flow_delta_frames: 20
 stage05_household_mixed:
   dataset_path: /opt/data/private/lq/datasets/molmoact_dataset_household-v3_stage05
   ar_sidecar_path: /opt/data/private/lq/ZR-0/outputs/stage05_four_dataset_pretraining_20260904/data_sidecars_v7/ar/household
@@ -84,6 +104,9 @@ stage05_household_mixed:
   stats_key: stage05_household
   use_quantile: true
   sample_ratio: 1.0
+  optical_flow_data_root: /opt/data/private/lq/datasets/molmoact_dataset_household-v3_stage05/stage06_flow/molmoact_household
+  optical_flow_manifest: manifest.7a445e019d8e566c.jsonl
+  flow_delta_frames: 20
 stage05_tabletop_mixed:
   dataset_path: /opt/data/private/lq/datasets/molmoact_dataset_tabletop-v3_stage05
   ar_sidecar_path: /opt/data/private/lq/ZR-0/outputs/stage05_four_dataset_pretraining_20260904/data_sidecars_v7/ar/tabletop
@@ -99,6 +122,9 @@ stage05_tabletop_mixed:
   stats_key: stage05_tabletop
   use_quantile: true
   sample_ratio: 1.0
+  optical_flow_data_root: /opt/data/private/lq/datasets/molmoact_dataset_tabletop-v3_stage05/stage06_flow/molmoact_tabletop
+  optical_flow_manifest: manifest.f61339e88e1b99c9.jsonl
+  flow_delta_frames: 20
 stage05_rh20t_mixed:
   dataset_path: /opt/data/private/lq/datasets/RH20T-v30_stage05
   ar_sidecar_path: /opt/data/private/lq/ZR-0/outputs/stage05_four_dataset_pretraining_20260904/data_sidecars_v7/ar/rh20t
@@ -115,6 +141,9 @@ stage05_rh20t_mixed:
   stats_key: stage05_rh20t
   use_quantile: true
   sample_ratio: 1.0
+  optical_flow_data_root: /opt/data/private/lq/datasets/RH20T-v30_stage05/stage06_flow/rh20t
+  optical_flow_manifest: manifest.81ff8628f688bea5.jsonl
+  flow_delta_frames: 20
 libero_wo_ecot_pt:
   dataset_path: /opt/data/private/lq/datasets/HuggingFaceVLA/libero
   dataset_type: vla

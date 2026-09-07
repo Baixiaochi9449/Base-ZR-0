@@ -110,6 +110,28 @@ class GlobalSupervisionCounts:
     ar_tokens: torch.Tensor
     action_elements: torch.Tensor
     flow_samples: torch.Tensor | None = None
+    slot_samples: torch.Tensor | None = None
+    slot_active_samples: torch.Tensor | None = None
+    slot_covered_samples: torch.Tensor | None = None
+    batch_samples: torch.Tensor | None = None
+
+    def activity_metrics(self, *, loss_type, vlm_loss_weight, action_expert_loss_weight,
+                         optical_flow_config=None, slot_config=None):
+        zero = torch.zeros_like(self.ar_tokens)
+        flow_active = optical_flow_config is not None and optical_flow_config.enabled and optical_flow_config.optical_flow_loss_weight > 0
+        result = {
+            "ar_active_token_count": self.ar_tokens if loss_type in AR_LOSS_TYPES and vlm_loss_weight > 0 else zero,
+            "fm_active_element_count": self.action_elements if loss_type in FM_LOSS_TYPES and action_expert_loss_weight > 0 else zero,
+            "flow_active_sample_count": self.flow_samples if flow_active else zero,
+        }
+        if self.slot_active_samples is not None:
+            result["slot_active_supervision_count"] = self.slot_active_samples.sum()
+            result["slot_active_loss_computed"] = bool(self.slot_active_samples.sum() > 0)
+            for index, q in enumerate(slot_config.slot_task_weights):
+                result[f"slot_{q}_active_count"] = self.slot_active_samples[index]
+        result["active_supervision_available"] = any(bool(value > 0) for key, value in result.items()
+            if key in {"ar_active_token_count", "fm_active_element_count", "flow_active_sample_count", "slot_active_supervision_count"})
+        return result
 
 
 def global_supervision_counts(
@@ -118,6 +140,7 @@ def global_supervision_counts(
     loss_type: str,
     accelerator,
     optical_flow_config=None,
+    slot_config=None,
 ) -> GlobalSupervisionCounts:
     if not batches:
         raise ValueError("optimizer-step accumulation window must not be empty")
@@ -141,6 +164,39 @@ def global_supervision_counts(
                 )
             local[1] += action_mask.to(dtype=torch.bool).sum().to(device=device, dtype=torch.float64)
     global_counts = accelerator.reduce(local, reduction="sum").detach()
+    slot_counts = None
+    slot_active_counts = None
+    slot_covered_samples = None
+    batch_samples = None
+    if slot_config is not None and slot_config.enabled:
+        from utils.slot_labels import task_validity
+        from utils.aux_objectives import slot_objective_components
+        components = slot_objective_components(slot_config)
+        slot_counts = torch.zeros(9, dtype=torch.float32, device=device)
+        slot_active_counts = torch.zeros(9, dtype=torch.float32, device=device)
+        coverage = torch.zeros(2, dtype=torch.float64, device=device)
+        for batch in batches:
+            validity = task_validity(batch, device=device)
+            raw = torch.stack([validity[q].sum() for q in slot_config.slot_task_weights]).to(torch.float32)
+            slot_counts += raw
+            coverage[0] += torch.stack(list(validity.values())).any(0).sum()
+            coverage[1] += batch["input_ids"].shape[0]
+            for index, q in enumerate(slot_config.slot_task_weights):
+                if not components[q]:
+                    continue
+                active = validity[q]
+                if q == "Q9":
+                    # Q9's denominator is the union of all label masks, but
+                    # activity only includes positively weighted components.
+                    active = torch.zeros_like(active)
+                    for component in components[q]:
+                        mask = batch.get(f"slot_Q9_{component}_mask")
+                        if mask is not None:
+                            active |= mask.to(device=device, dtype=torch.bool).reshape(len(active), -1).any(-1)
+                slot_active_counts[index] += active.sum()
+        slot_counts = accelerator.reduce(slot_counts, reduction="sum").detach()
+        slot_active_counts = accelerator.reduce(slot_active_counts, reduction="sum").detach()
+        slot_covered_samples, batch_samples = accelerator.reduce(coverage, reduction="sum").detach()
     if loss_type == "vlm" and global_counts[0].item() <= 0:
         raise ValueError("optimizer-step AR supervision count is zero")
     strict_joint_fm = any(
@@ -154,6 +210,10 @@ def global_supervision_counts(
         ar_tokens=global_counts[0],
         action_elements=global_counts[1],
         flow_samples=global_counts[2] if flow_enabled else None,
+        slot_samples=slot_counts,
+        slot_active_samples=slot_active_counts,
+        slot_covered_samples=slot_covered_samples,
+        batch_samples=batch_samples,
     )
 
 
@@ -167,9 +227,14 @@ def scaled_microbatch_loss(
     gradient_accumulation_steps: int,
     data_parallel_world_size: int,
     optical_flow_loss_weight: float = 0.0,
+    slot_config=None,
 ) -> torch.Tensor:
     scale = float(gradient_accumulation_steps * data_parallel_world_size)
     terms = []
+    if slot_config is not None and slot_config.enabled:
+        for i, (q, weight) in enumerate(slot_config.slot_task_weights.items()):
+            numerator = outputs[f"slot_{q}_loss_sum"]
+            terms.append(slot_config.slot_loss_weight * weight * numerator / counts.slot_samples[i].clamp_min(1))
     if optical_flow_loss_weight > 0:
         flow_sum = outputs["optical_flow_loss_sum"]
         terms.append(optical_flow_loss_weight * flow_sum / counts.flow_samples.to(flow_sum.dtype).clamp_min(1))

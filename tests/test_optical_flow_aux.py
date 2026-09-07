@@ -132,7 +132,7 @@ def test_reader_mapping_lru_pickle_and_corruption(tmp_path):
     with pytest.raises(DatasetIntegrityError):
         reader.read(0, 3)
     with pytest.raises(DatasetIntegrityError):
-        OpticalFlowReader(tmp_path, manifest)
+        OpticalFlowReader(tmp_path, manifest).read(0, 3)
     manifest.write_text(json.dumps(entries[1]) + "\n" + json.dumps(entries[1]))
     with pytest.raises(DatasetIntegrityError, match="duplicate"):
         OpticalFlowReader(tmp_path, manifest)

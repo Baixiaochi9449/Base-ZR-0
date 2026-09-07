@@ -1,5 +1,58 @@
 # Implementation Reference
 
+## Fifth auxiliary review: explicit Head removal and static objectives
+
+- Date: 2026-09-07. Purpose: permit Stage 2 to Stage 3 Head ablations and reject
+  Stage 2 configurations that cannot produce any positive weighted objective.
+- Source: adaptations of the existing `resolve_slot_checkpoint`,
+  `resolve_flow_checkpoint`, `ZR0Model`, `parse_train_options`, launcher and
+  `global_supervision_counts`; no external implementation. The new connected
+  `utils/aux_objectives.py` shares the coefficient chain between the existing
+  phase resolver and window activity calculation, which previously differed.
+- Switches: the existing `WITH_SLOT=0` / `WITH_FLOW=0` launcher flags now emit
+  explicit `none` and zero outer weight. An omitted CLI Head option still
+  inherits the source configuration. Only explicit `init_from_checkpoint`
+  across different declared stages permits removing saved Heads; ordinary
+  loading and same-stage resume remain strict. No new missing-Head random
+  initialization policy is introduced.
+- Source validation: source config fields, hashes, statistics, complete Flow
+  tensor shapes, Query tensors and common role metadata are checked before
+  constructing target modules, including when both target Heads are absent.
+  Validation reads checkpoint artifacts, not disabled dataset labels. Saved
+  Query total, weights and role boundaries are retained. Expert initialization
+  retains the existing independent seed42 policy and all-Query conditioning.
+- Config-object input: `SlotConfig()` / `OpticalFlowConfig()` explicitly remove
+  their respective saved Head during cross-stage init. Unspecified constructor
+  defaults inherit the saved inactive settings; nondefault conflicting
+  settings and an explicit changed Query count are rejected. CLI fields retain
+  their exact explicitness, including explicit values equal to defaults.
+- Outputs: the target checkpoint exports only active Head weights. Common
+  metadata additionally persists the complete Slot runtime config plus hash,
+  including disabled Slot settings. Legacy checkpoints without this optional
+  field keep their previous defaults/artifact-based config resolution. Flow
+  config was already always exported. Resume rejects enabling a saved disabled
+  Head or changing its config. Source files are never rewritten.
+- Static objective semantics: Stage 2 requires an enabled Head with a positive
+  outer coefficient and a positive effective task. Q1-Q8 always contain their
+  unit-coefficient base losses; Q9 requires at least one positive presence,
+  bbox or risk coefficient. Positive Flow is an alternative. CLI and model
+  validate the final inherited/overridden config before dataset/large-model
+  construction. Error messages report the stage and complete weight chain.
+  Stage 3 zero-weight Slot ablations remain legal through AR/FM.
+- Runtime compatibility: static validity does not inspect sample masks or loss
+  values. Raw coverage, loss reductions, positive-weight zero loss, GAS/rank
+  aggregation and empty-window synchronization/skipping are unchanged. Stage1,
+  explicit four-source dataset routes and sampler epoch restoration retain
+  their existing behavior. Slot artifact identity inputs are unchanged, so
+  existing slot_sources_v3 and Aux/Joint sidecars remain usable.
+- Validation: `tests/test_aux_review5.py` records fail-first conversion,
+  source-integrity and CLI/model startup tests. The existing production matrix
+  now initializes heads-off Stage3 from real Stage2 Both; optional
+  `--cross-stage-removals` covers the other removals with real four-source data.
+  `scripts/verify_auxiliary_sampler_resume.py` verifies the converted checkpoint
+  with a fresh process and the full production sampler. Commands, results and
+  GPU/multi-rank limitations are recorded in `docs/structured_slot_review5.md`.
+
 ## Third Optical Flow review: verified optimizer updates
 
 - Date: 2026-09-06. Purpose: do not count AMP overflow as completed supervision.
@@ -464,7 +517,7 @@
 ## Optical Flow Auxiliary Head 与显式三阶段训练
 
 - 日期：2026-09-06。
-- 修改目的：接入训练期连续光流回归；stage2 当前为 OF-only，stage3 为 AR+FM+OF provisional joint。Slot 未实现，不创建 Head、参数或有效数值 loss；仅报告 `slot_loss_computed=false`。
+- 修改目的：接入训练期连续光流回归；此条记录原 OF-only 实现。其“Slot 未实现”状态已由下方 Structured Slot Heads v1 条目取代；Slot 关闭时仍保持 OF-only/provisional 行为及历史 checkpoint 兼容。
 - 涉及文件：`model/optical_flow_aux_head.py` 的 `DenseRegressionFlowHead`/factory；`utils/optical_flow_config.py` 的配置、stage/Slot registry；`utils/optical_flow_reader.py::OpticalFlowReader`；`utils/optical_flow_loss.py`；`utils/stage06_dataset.py::Stage06LiberoDataset`；`utils/optical_flow_checkpoint.py`；现有 `ZR0Model`、CLI、dataset spec/collator、optimizer loss accumulator、训练循环与 checkpoint helper 的最小接入；`dataset2feature.yaml`、启动模板、审计/实验文档和对应测试。
 - 实现来源：Head、OF reader/loss、集中配置与 Flow artifact 合同是自定义新增。现有模型没有稠密光流输出或 HDF5 对齐读取能力，不能直接复用 FM Action Expert 作为光流监督 Head。数据侧复用并适配 `utils/stage05_dataset.py::Stage05MixedPretrainingDataset` 的 `_source_data_path`、`_episode_rows`、`_video_path`、`_decode_video`；复用 `utils/load_training_dataset.py::prepare_qwen_vl_inputs_cpu`、`prepare_action_expert_inputs_cpu`、collator、episode sampler；复用 `QwenVLBackbone`、Difference Query mask/sidecar、`ZR0Model._loss_outputs`、`utils/optimizer_step_loss.py` 的全局窗口归一化、`utils/training_checkpoint.py` 的 DeepSpeed 保存恢复。不复制或修改 Difference Query attention mask/Action Expert 数据流。
 - 外部来源：仅消费外部 MegaFlow pseudo-label，未复制模型代码。生成器版本 `ee5b61813db0a76ac0db9034899aade72a0d230c`、外部路径、生成权重 SHA256 和完整 manifest 来源见 `docs/optical_flow_data_audit.md`；生成端 resize 插值未验证为训练端相同，不据此宣称完全一致。
@@ -488,3 +541,130 @@
 - Token audit 可信绑定：`configs/stage05_four_dataset_experiment.json` 固定 format v2、required max 941、报告 content/file SHA256 和 implementation identity SHA256；launcher 与独立 `--validate-only` 在未传 `--trusted-spec` 时都自动使用这份版本控制规格，禁止通过省略参数或环境变量绕过。sidecar 身份更新后已重新生成 `audits/token_length_audit_v9_format2.json` 并更新规格；LIBERO 不继承 Stage05 941 门禁。
 - 验证方式：六项 Finding 定向生产入口组为 88 passed；全量 CPU 回归为 383 passed、3 skipped。覆盖真实 `vlm_and_action` manifest 经 `ZR0Model.save_pretrained` 保存/验证、purpose/resume 冲突、损坏合同/Expert safetensors/训练状态、H 32->10、16->8、8->16 和不变 H、token 规格/报告移动/自重哈希篡改、launcher 940/941/1024，以及实际旧 Tabletop step-19424 的 LIBERO H=10 dry-run。train/server help、三个 shell launcher 语法和 validate-only 均通过。
 - 已知限制：本轮未启动 GPU、Stage05 多卡训练、真实 DeepSpeed 多卡 resume、LIBERO 训练或 rollout。Joint resume 的合同、safetensors、scheduler、DeepSpeed/client/optimizer state 与 global step 只完成 CPU 生产预检；不能据此宣称动态多卡恢复完成。若实际 checkpoint 的 `save_pretrained` 改写 processor 文件，必须对该 checkpoint 重新执行 token audit，严格 validator 会拒绝沿用 base-model 报告。
+
+## Structured Slot Heads v1
+
+- 本节记录首轮实现和当时验证。单集路由、损坏标签屏蔽、启动扫描 Flow mask 及历史 digest 替换等描述已经废弃；当前有效合同以文末第三轮修复记录为准。
+- 日期：2026-09-06。
+- 最终验证记录：完整相关回归 235 passed（6 项依赖/测试 scheduler warning）；随后补齐整数负损失系数校验，Head/loss 定向回归 40 passed，包含新增22项配置用例，计数有重叠。CLI help、四种 launcher dry-run、Bash 语法和 diff whitespace 检查通过。实际29个任务文件清单与展开命令见 `docs/structured_slot_training.md`。
+- 修改目的：仅在训练期向前部 Difference Query 添加 Q1-Q9 结构化监督，支持 Slot-only 与 Slot+Flow；解决合并数据沿用历史标签、缺失监督和跨 rank/GAS 归一化问题。
+- 涉及文件：新增 `utils/slot_config.py`（`SlotConfig`、registry、`resolve_query_layout`）、`model/structured_slot_head.py`（`StructuredSlotHead`、`slot_groups`、factory）、`utils/slot_labels.py`（`normalize_slot_labels`、`task_validity`）、`utils/slot_loss.py`（`slot_loss`、`finalize_slot_metrics`）、`utils/slot_supervision.py`（审计、`SlotSupervisionReader`、`SlotSupervisedDataset`）、`utils/slot_checkpoint.py`（三文件保存/读取/完整性验证）；接入 `ZR0Model`、`utils/cli_options.py`、`utils/optimizer_step_loss.py`、`train_vla.py`、现有 v3/Stage05 adapter/collator、Flow 配置/阶段状态/reader。新增审计脚本、CPU smoke、Slot launcher、ZeRO-2 YAML、固定统计和审计/训练/实验文档。
+- 配置开关与默认状态：`slot_aux_type=none`、`slot_loss_weight=0`；启用 `structured_slots_v1` 需要 DQ 开启、至少七个 Slot token 和审计目录。原“Head 启用必须正外层权重”要求已由下方第四轮修复更新为允许零权重消融；Stage2 仍必须至少有一个正权重优化目标。首次分区须显式 `num_flow_queries`，Flow 关闭允许零；DQ32/F8 分组为 `[3,3,3,5,3,3,4]`。已有 checkpoint 分区优先，显式冲突报错；Flow 关闭仍保留尾部分区。
+- 实现来源：Head、结构化标签/损失/固定统计/锚点校验为自定义新增；现有 Flow Head 的稠密二维回归无法直接输出多种 Slot 结构与独立 mask。工程接入基于原仓库适配，未引用外部论文或复制外部代码。
+- 原始实现与适配：复用 `utils/future_difference_audit.py::_load_episode_mapping/_resolve_annotation_root/_active_training_samples/_data_paths` 定位原始样本；复用 `LeRobotV3FutureDifferenceDataset`、`Stage05MixedPretrainingDataset` 图像/动作/文本路径，Stage 2 允许只构建图像/task、丢弃 AR target，之后由共享 wrapper 附加标签。复用 `QwenVLBackbone` 已有 final RMSNorm Query 输出与 attention mask，不改 Query 双向注意力或 Action Expert 输入。扩展 `GlobalSupervisionCounts/scaled_microbatch_loss` 和 `run_optimizer_step_window` 独立统计九个任务分母；复用 `OptimizerWindowStep` 成功更新确认与训练 runtime 保存恢复入口。
+- Head 结构与输入输出：前部 Slot Query 的七个连续组分别无参数均值池化，整数最大余数法分组，固定顺序打破平局；LayerNorm+Linear 输出 Q1 `[B,2]`、Q2 `[B,2,7]`、Q3/Q4 `[B,2,4]`、Q5 `[B,3,3]`、Q6 `[B,2,2]`、Q7/Q8 `[B,4]`、Q9 `[B,3,6]`。Q7/Q8 共享 LN；其他 Heads 独立。Q9 单个 Linear(H,18)，输出 bbox/risk/presence logit。Q1/Q6/risk 使用 sigmoid，bbox 为指定合法 xyxy 参数化。H=2048 实测 178,247 参数，测试校验小于 0.2M 且不随 Query 数改变，不硬编码估计值断言。初始化使用隔离 CPU RNG。
+- 监督与数据流：源 `base_data` 校验 v5 schema、first_view、10FPS、语义起止时间、米制独立相机坐标。73,081 个源锚点与合并 Parquet 标签逐条一致；237,662 个沿用标签全部关闭 Slot mask。Reader 再核验源文件摘要和锚点集合，防止将相同沿用标签伪装成新锚点；每次读取标签核验 hash。未知非空类别携带 dataset/episode/frame 报错；null/缺失/非法 mask/非有限数值关闭对应监督。Q9 显式 mask=0 是 presence 负例，缺失 mask 不制造负例，presence/bbox/risk 独立有效性。标签、源标注、类别/Q5 统计不进入 prompt、Query 输入或 AR target。
+- 采样：Stage 2 默认 `stage2_aux_sampling=slot_valid`；显式 `any_aux_valid` 可混入有效 Flow-only 样本，Flow reader 按已有 delta/source 与 56x56 pooling-mask 规则构建可用集合。Stage 3 保留原采样。Slot-off 完全保留既有 Flow-only 采样。原图/resize/相机排列、动作表示/horizon、已有 optimizer/scheduler 默认值均不改变。
+- Loss：任务权重 Q1-Q9 为 `.20,.20,.04,.04,.04,.20,.12,.12,.04`。每项先样本内 masked mean，再按全局有效样本数平均，缺失项不重新分配权重。Smooth L1 beta=1；CE smoothing=.02，固定 sqrt 逆频率、最大比10、有效训练标签平均权重1。Q5 target/gripper/relative 各轴固定 mean/std，std 下限 .001m；Head 输出归一化位移，恢复米制后计算相对一致性 Smooth L1。单调权重 .1、GIoU .1、Q5 一致性 .05、Q9 presence/bbox/risk=.5/.25/.25；全部由集中配置及 CLI 控制并保存。所有 loss 与 reduction 使用 FP32。
+- 分布式与日志：空 rank 返回连接所有 Head 参数和 Slot Query 的零；DDP/world-size/GAS 缩放沿用原实现。全局 Stage 2 无有效 Slot/Flow 同步跳过 backward、AdamW、scheduler/global step。各任务计数、可用状态、raw/weighted loss；分类混淆矩阵、RMSE 平方和、presence TP/FP/FN 全局求和后算指标；缺失指标不输出伪造数值。只有成功 optimizer 更新才累计 checkpoint `slot_loss_computed`。
+- 阶段与兼容：Stage 1 仍 AR-only；Stage 2 不实例化 Action Expert，VLM 仅冻结参数而保留反向图，默认只训练 Query/启用辅助 Heads。Stage 3 默认训练 VLM/Query/Heads/新初始化 Expert。Slot 阶段须显式 `init_from_checkpoint` 或同阶段 resume；1->2 新建 Heads，2->3 恢复辅助 Heads；init 重建 optimizer/scheduler/step/RNG，旧 Expert 不隐式复用。保存 `slot_aux_config.json`、`slot_head.safetensors`、`slot_supervision_stats.json`，绑定 schema、统计生成规则、词表、边界、配置、hidden size/shape 与摘要；不完整、shape/词表/分区/CLI 冲突报错。兼容旧“Slot未实现”状态；沿用 ZeRO-3 拒绝策略。推理不实例化 Slot Head、不读取样本标签、不执行 Slot 预测。
+- 关闭功能后的行为：不构造 Slot、不添加参数或 loss、不加载监督索引，不产生新 Slot artifacts；保留原 Query-off、AR-only、Flow-only、action-only、server 路径。
+- 验证方式：`tests/test_structured_slots.py`、`tests/test_slot_integration.py`、`tests/test_slot_data.py` 覆盖分组/参数/输出、Q1-Q9 手算损失、独立 mask、锚点伪造、真实 tiny Qwen 输入隔离、冻结梯度、GAS 与双 rank Gloo 空 rank/空窗口、AMP 跳步、checkpoint/推理、四种 launcher dry-run；现有 Flow/Query/adapter/阶段/恢复/server 回归。真实 DQ32/H32 step-7284 与 Tabletop episode0 frame0/9 的 CPU Stage2/3 各两步，模型/Slot exact roundtrip，全部有限且 Query/Head 更新；详见 `docs/experiments/structured_slots_v1_cpu/results.json`。
+- 审计结果：完整统计见 `docs/structured_slot_audit.json`；类别频次与先前计划一致，Q5 最大米制残差 `8.88e-16`；未发现非法正 bbox/contact/risk、mask、非有限值或非零 Q9 padding。Q9 三个位置正例为 `[39530,174,0]`，显式负位置179539。Slot 语义 tK 间隔1-50帧/中位8/P90=27，Flow 保留固定t+10，不添加跨 Head 同时域假设。
+- 已知限制：真实 GPU smoke/Slot ZeRO-2 动态恢复及完整 benchmark 未运行（四张 A800 均被既有任务占用）；正式训练未启动。真实 CPU 联合 smoke 仅两个锚点，不证明收敛或任务成功率。Q9 第三位置无正例、Q5 有多米级独立估计极值；不额外裁剪。v1 审计限定完整 train-only 数据，运行需保留源标注可读以复核时间对齐。v3 的 aux 允许列表使 `dataset_adapters.py` 全文件 SHA 改变，旧 Stage05 sidecar 会被原有 generator identity 门禁判为 stale；不得修改摘要冒充兼容或覆盖旧产物。Stage05 新实验须独立重建 sidecar；原 Stage05 Joint resume 保留原代码/sidecar 合同。本文两条正式示例使用无该 sidecar 依赖的 v3 adapter。
+- 已废弃的第二轮状态（2026-09-06）：曾替换 AR adapter digest 并仅检查部分 token 实现身份，且四集生产数据流未贯通。第三轮已删除这种摘要替换和部分校验，不得将第二轮 launcher 通过视为真实四集训练通过。
+
+## 四数据集 Auxiliary 第三轮修复
+
+- 日期：2026-09-07。
+- 修改目的：修复独立审核 F1-F11，接通 partial DROID、Household、Tabletop、RH20T 的 Stage 2/3 Slot-only、Flow-only、Slot+Flow 六种配置。
+- 涉及文件与接口：`utils/stage05_dataset.py::Stage05MixedPretrainingDataset`、`utils/optical_flow_reader.py::OpticalFlowReader`、`utils/slot_supervision.py::audit_slots/SlotSupervisedDataset`、`utils/slot_labels.py::normalize_slot_labels`、`utils/slot_loss.py::slot_loss`、`utils/optical_flow_loss.py::prepare_flow_targets`、`utils/dataset_seen_tracker.py::DatasetSeenTracker`、`utils/dataset_manifest.py`、`utils/dataset_spec.py`、`utils/slot_checkpoint.py`、`utils/load_training_dataset.py`、`utils/cli_options.py`、`train_vla.py`；新增辅助合同、路由、索引和兼容模块及产物/诊断脚本。
+- 配置开关：复用 `slot_aux_type`、`optical_flow_aux_type`、各自 loss weight 和 checkpoint 自动恢复优先级；默认均关闭。launcher 使用独立 `WITH_SLOT`（默认1）与 `WITH_FLOW`（默认0），新增可选 `--aux_dataset_config` 指向 `configs/aux_four_dataset_v1.json`。Flow 关闭时不读取 Flow manifest、不打开 HDF5、不建索引；旧 options 仅补确实缺失的 Slot 默认字段。
+- 实现来源：原仓库适配。模型、loss、collator、采样、全局 GAS/rank 计数、checkpoint 保存恢复均复用前述原接口。没有引入外部训练框架或复制模型。自定义新增的 `utils/aux_data_contract.py` 将原映射、manifest 内容摘要、HDF5 metadata 与源时间戳组成可持久化合同；`utils/slot_routing.py` 将已有单源 reader 组成严格按 dataset path/identity/camera 路由的集合；`utils/aux_sampling.py` 读取经过内容/来源验证的离线候选索引。原 reader 不支持四源路由和源身份恢复检查，因此需要这些独立模块。
+- 输入输出和数据流：registry + 新产物 overlay -> 生产 Stage05 样本的真实 dataset/episode/frame -> 各源 reader -> 现有 collator -> 生产 Head/loss。Flow 样本携带 target、mask、actual/nominal delta、FPS、label source、排除原因；首访 episode 才验证真实帧映射和 HDF5 内容，成功后原子加入有界 LRU，异常清除缓存，worker 不共享句柄。稀疏与乱序帧不再使用行号伪造 frame_index。
+- 监督语义：四源 nominal delta20；DROID15 FPS=4/3秒，其余10 FPS=2秒。原 LIBERO 默认 delta10 保留。loss 使用每样本已验证的 nominal delta；尾部短间隔/identity、缺标签和空有效 mask 单独计数。Slot 正 mask 下损坏数值、几何、结构或必需 mask 缺失报带字段路径的错误；合法 null/缺失子项和显式 invalid 仍屏蔽，Q1按字段存在性，Q9缺 mask 不制造负例。
+- 统计：四集分别验证语义锚点与来源；Q2/Q7/Q8词表顺序固定，类别权重合并训练锚点计数生成；Q5均值/标准差按 `slot_dataset_index` 路由。聚合统计以版本2保存到 Slot checkpoint，包含每集完整版本1统计。wrapper 保留 manifest、源身份和过滤前长度，seen/anchor/Q1-Q9/Flow样本及有效像素/排除原因跨rank汇总。
+- 采样与关闭行为：Stage 3沿用 Joint索引，不在启动时扫描 Flow mask。Stage 2 Slot-only 使用锚点；Flow-only 使用元数据候选；联合使用并集。候选规则为 nominal delta、source1和正 valid_fraction，是保守候选集，精确 pooled mask 在当前样本验证。原正式训练/评估图像、动作horizon、optimizer和学习率默认值未修改。
+- AR兼容：`generator_identity` 始终报告真实文件摘要。`utils/stage05_compatibility.py` 和 `configs/stage05_ar_compatibility_v1.json` 仅接受经过审阅的完整历史/当前依赖清单对；任一文件或整体清单改变仍拒绝。历史 token audit、processor/data/truncation/sampling 校验保留，Joint不使用AR兼容例外。依据及复现实验见 `docs/structured_slot_review3.md`。
+- 新产物：`scripts/build_auxiliary_artifacts.py` 复用现有 sidecar、Slot audit和精确 token audit工具，在 `/opt/data/private/lq/ZR-0-artifacts/structured_slots_review3_v1` 独立生成；只扫描必要标签/元数据，不全量解码图像或 Flow mask。历史产物和运行中配置保留。
+- 验证方式：第三轮先复现失败，再修复；真实生产构造、batch、tiny backward、CPU全量回归、有限GPU/多GPU结果分别记录在 `docs/structured_slot_review3.md` 及 `docs/experiments/structured_slots_review3/experiment.md`。本条不将尚未完成的验证视为通过；详细状态以闭环记录为准。
+- 已知限制：离线 Flow 候选不能保证所有样本池化后都有有效像素，训练时按精确 mask 排除且不进入分母。Slot 固定统计不裁剪原始位移极值。诊断使用 tiny模型，不证明2B模型收敛或任务成功率。本次不启动正式训练、不自动暂存、不创建commit。
+- 最终索引合同：新增独立 `slot_v2` 索引及 `slot_sources_v2/slot_routes.json`，保留先前离线 audit。索引版本2将锚点内容、Stage05映射、源标注根目录和索引/normalizer完整实现摘要绑定到固定统计，记录原 audit 的摘要作为派生依据。源标注首次访问严格验证，成功后缓存最多4个episode；标签Parquet缓存最多2个。Stage3直接复用原索引及采样分组，不再逐帧构建辅助有效性列表。旧索引版本1的启动校验与伪造锚点拒绝测试继续保留。
+- 最终真实验证：六种配置均构造四集生产dataset/dataloader，真实batch中每项启用的Q任务有效数4，Flow合格样本4/有效池化像素12498；Stage2冻结VLM、更新Query和启用Heads、无Expert，Stage3活动模块均更新。真实非锚点/尾部batch的Slot分母为零。两卡A800 BF16/ZeRO2联合模式在Stage2/3均完成有限更新、新进程模型/optimizer/scheduler/RNG/数据计数精确恢复；Stage2空rank、尾部空microbatch及全局空窗口检查通过。GPU确切复算使用诊断显式确定性算子，不改变生产默认配置。完整原388项、补充111项及新增32项的最终结果、文件身份与命令见 `docs/experiments/structured_slots_review3/results.json` 和 `commands.md`。
+
+## 四数据集 Auxiliary 第四轮修复
+
+- 日期：2026-09-07。目的：关闭 R4-1 显式数据路由被双 Head 关闭状态忽略，以及 R4-2 仅零权重 Slot 标签触发 AdamW 更新；独立验证真实生产 sampler 的新进程恢复。
+- 实现来源：原仓库适配，无外部算法或新训练框架。修改 `utils/load_training_dataset.py::build_concat_streaming_dataset`，使显式 `aux_dataset_config` 始终选择数据/sidecar 路由，并拒绝空、错误类型和缺失的数据集路由。复用既有 Stage05 reader 开关，Slot/Flow 关闭时仍不读取标签 manifest、候选索引或 HDF5。未提供 overlay 的旧 Stage1 路径不变。
+- 活动监督：扩展既有 `utils/optimizer_step_loss.py::GlobalSupervisionCounts/global_supervision_counts`，保留原分母和原始标签覆盖计数；新增按有效正系数判断的活动计数。Slot 同时考虑外层系数、Q1-Q9 任务系数，Q9 还按 presence/bbox/risk 的独立 mask 和系数取并集。AR/FM/Flow 使用各自当前目标和正系数。`train_vla.py::run_optimizer_step_window` 在完整 GAS 窗口跨 rank 求和后统一跳步，不根据 loss 数值决定更新。没有活动监督时不调用 forward/backward/optimizer/scheduler，不清空先前窗口状态；同一窗口其他 microbatch/rank 的活动梯度照常保留及同步。
+- 原有参数拒绝合同：窗口入口复用 `ZR0Model._validate_loss_weight`，在跳步判断前执行已有 AR/FM 有限/非负及当前目标正权重校验，避免非法 AR/FM 零系数被当成合法无监督窗口。该验证未放宽原 Stage1/Joint 模型的拒绝条件。
+- 配置兼容：`utils/slot_config.py::SlotConfig.validate` 允许 Head 启用且 `slot_loss_weight=0` 的消融，仍要求内部存在正任务系数、所有系数有限非负、关闭 Head 时外层权重为0。默认 `slot_aux_type=none/slot_loss_weight=0` 不变。原 AR/FM 配置验证、Stage2 双 Head 关闭拒绝、loss reduction、label masks、采样规则、图像/动作处理和 optimizer 默认值不变。
+- 输出与日志：保留 `slot_Q*_valid_count`、`slot_sample_coverage` 和标签可用状态；独立记录 `slot_Q*_active_count`、`slot_active_supervision_count`、`ar_active_token_count`、`fm_active_element_count`、`flow_active_sample_count`、`active_supervision_available`。跳步窗口不伪造 loss；`optimizer_update_applied=false` 且 scheduler/global step 与 AdamW 动量/步数不变。正常监督恰好数值 loss=0 仍按活动监督执行更新。
+- 产物：配置校验文件属于 Slot 索引身份依赖。使用原 `scripts/build_auxiliary_artifacts.py --phase slot-index --index-version 3` 派生独立 `slot_v3` 和 `slot_sources_v3`，逐项核对与 v2 的锚点、映射、类别权重和 Q5 统计完全一致，只新增当前完整实现身份；历史 v2、AR/Joint/Flow 产物保留。launcher 继续要求显式传入 Slot 目录，本轮命令传 v3。
+- 验证工具：扩展 `scripts/verify_auxiliary_production.py` 为第七种 Stage3 双 Head 关闭模式，对不存在的辅助产物和 reader/HDF5 访问设置拒绝探针。新增 `scripts/verify_auxiliary_sampler_resume.py` 复用生产 loader/sampler/collator、训练窗口、runtime/checkpoint orchestration 与现有 `_TinyEngine` CPU checkpoint 测试适配器；生产数据无需固定样本文件，按真实 cursor 跳过后恢复 RNG，再比较后续样本身份、所有 batch 张量、loss、参数、optimizer/scheduler 和 seen 状态。CPU checkpoint 传输适配器不代表 ZeRO-2 验证。
+- 测试：`tests/test_aux_review4.py` 覆盖零任务/外层/Q9 子项系数、空标签、已有 AdamW 状态不变、数值零 loss 的有效更新、GAS 前/中/后无活动 microbatch、双 rank 单侧无活动及全局空窗口、其他 Flow/AR/FM 目标有效更新、错误显式路由拒绝。最终全量回归和实际 sampler 范围以 `docs/structured_slot_review4.md` 及本轮实验文档为准。
+- 独立 sampler 复现与修复：初次对照从指定 epoch 同时新建两个 prepared loader，暴露了验证不足；随后加入完整遍历前一 epoch 的小规模生产 sampler 对照，以及真实四集的实际 sampler epoch 断言，均复现 epoch1 被 Accelerate `DataLoaderShard.__iter__` 按默认 `iteration=0` 重设的问题。新增 `utils/load_training_dataset.py::set_dataloader_epoch` 同时通知原始 sampler 和 prepared loader，接入实际训练循环及诊断脚本；保留未包装 loader 的兼容行为和原 shuffle 算法。最终 epoch1 证据只采用这一修复之后的独立输出目录。
+- 已知限制：第三轮 `verify_auxiliary_zero2.py` 的固定真实样本恢复证据只证明该固定输入的恢复；第四轮生产 sampler 验证单独记录。未授权完整2B、四rank或正式训练，本轮无相关就绪声明。
+- 最终验收：最后一次源码修改后 561 个唯一用例全部通过（原531加新增30），无失败或跳过；历史 launcher12/12、token audit12/12、AR scheduler/resume33/33、necessary repairs38/38 保持通过。七种四集真实数据配置均完成 CPU BF16 tiny 更新，双 Head 关闭使用不可用辅助路径仍完成 AR/FM 更新。生产 sampler 的 workers0/2/4、GAS2/3、epoch0/1 三组对照在新进程恢复后，后续数据与 mask、参数及完整 optimizer/scheduler/seen 状态 rtol=atol=0 一致。四张 GPU 均被已有任务占用，本轮未执行 GPU/ZeRO-2；多 rank 真实 sampler、完整2B及四rank更新仍未验证。逐项闭环、完整命令、模块来源和文件摘要见 `docs/structured_slot_review4.md` 与 `docs/experiments/structured_slots_review4/{commands.md,results.json}`。
+
+## RoboTwin Conda 环境与显式 CUDA、渲染检查
+
+- 日期：2026-09-07。
+- 修改目的：按用户要求安装独立 Python 3.10 仿真环境，补齐原安装脚本缺失的依赖清单，并验证 CUDA 与 SAPIEN 离屏渲染。
+- 涉及文件：`evaluation/RoboTwin/script/requirements.txt`、`constraints.txt`、`check_render.py::check_render`、`check_cuda.py::check_cuda`、`.gitignore`；安装命令、环境路径、版本清单和结果见 `docs/experiments/robotwin_environment_20260907/experiment.md` 及同目录产物。
+- 实现来源：依赖清单直接恢复自 RoboTwin stable_2.0 commit `13c3c47ff4312dd62484bcd51be034af55c062d1` 的 [script/requirements.txt](https://github.com/RoboTwin-Platform/RoboTwin/blob/13c3c47ff4312dd62484bcd51be034af55c062d1/script/requirements.txt)。版本约束是对本仓库 `script/_install.sh` 的显式安装适配。PyTorch3D stable/0.7.8 来源 commit `75ebeeaea0908c5527e7b1e305fbc7681382db47`；CuRobo v0.7.8 来源 commit `d64c4b005459db10c5dd867d8b30a87d5bda9bdb`。
+- 配置开关：仅显式使用 `PIP_CONSTRAINT` 或 `pip -c script/constraints.txt` 才启用兼容版本约束；原 `_install.sh` 内容和默认调用不变。用户通过 `conda activate RoboTwin` 启用该环境的 CUDA/Vulkan/EGL 路径；退出环境恢复原变量。
+- 渲染检查设计：复用 `envs/_base_task.py::setup_scene` 的 RT shader、32 samples/pixel、path depth 8、OIDN 与 1/250 秒物理步长；复用 `envs/camera/camera.py` 的 `get_picture("Color")` API。自定义合成方块用于独立验证，避免依赖尚未下载的任务资源；检查 RGB 有限、非空、方块可见，以及 200 步模拟后落地和图像变化。
+- CUDA 检查设计：基于 [CuRobo v0.7.8 的 motion_gen_api_example.py](https://github.com/NVlabs/curobo/blob/d64c4b005459db10c5dd867d8b30a87d5bda9bdb/examples/motion_gen_api_example.py) 适配小型可达目标，直接复用 `MotionGenConfig`、`MotionGen.plan_single` 和自带 Franka 配置；用合成 ground mesh 验证 Warp 碰撞路径。自定义诊断入口同时调用 PyTorch3D `knn_points` 并与 `torch.cdist` 对照，检查五个 CUDA 扩展及轨迹末端误差。原任务入口依赖尚未下载的资源，无法直接满足独立安装验收。
+- 输入输出：渲染脚本必须显式执行并传入 `--output-dir`，输出两张 320x240 PNG 和 `result.json`；CUDA 脚本显式传入 `--output`，输入固定 seed 42 的小型点云及 Franka 合成目标，输出版本、数值误差、轨迹形状和显存统计 JSON。不读取策略模型或训练数据；没有 resize/crop/pad、模型归一化或策略动作输出。
+- 关闭后的行为：未执行检查脚本、未使用约束文件或未激活环境时，不增加模型依赖加载、GPU 运算或评估步骤；训练/推理数据流、默认模型和动作配置均不变。
+- 验证方式：NVIDIA Vulkan 四卡枚举、`pip check`、PyTorch3D CUDA KNN 对照、CuRobo 五个扩展与实际 mesh-world 轨迹规划、SAPIEN RT/OIDN 动态渲染、Conda 激活及路径恢复均通过；源代码与官方固定 commit 的 Git blob 摘要逐项一致。具体命令和数值见安装实验文档。
+- 已知限制：本次环境安装未执行策略 rollout；后续的任务配置与资源恢复已完成，见下节；checkpoint 归一化统计及正式评估仍需另行核对。用户态 NVIDIA 图形库绑定宿主驱动 535.104.05，宿主驱动升级后需要同步更新。
+
+## RoboTwin 官方配置与资源恢复
+
+- 日期：2026-09-07。
+- 修改目的：按用户要求补齐当前库的任务、相机、机器人映射配置及物体、机器人、背景纹理资源。
+- 涉及文件：`evaluation/RoboTwin/task_config/` 七个官方文件、`script/check_assets.py::check_files/check_render`；完整来源、命令、版本及结果见 `docs/experiments/robotwin_assets_20260907/experiment.md` 和同目录 JSON。大型资源及临时下载文件被现有忽略规则排除，不放入 Git。
+- 实现来源：配置直接恢复自 [RoboTwin stable_2.0 的 task_config](https://github.com/RoboTwin-Platform/RoboTwin/tree/13c3c47ff4312dd62484bcd51be034af55c062d1/task_config)，不改变内容；资源来自 [TianxingChen/RoboTwin2.0](https://huggingface.co/datasets/TianxingChen/RoboTwin2.0/tree/785feb15aa4a4f532395ad2b1d2be5f28cb561ad)。直接复用本仓库 `assets/_download.py` 和 `script/update_embodiment_config_path.py::main`，网络传输适配记录在实验文档。
+- 自定义检查：`check_files` 用 YAML/XML 解析器检查引用、机器人网格、生成的规划器配置及纹理编号；`check_render` 复用 `envs/adjust_bottle.py::adjust_bottle.setup_demo` 和 `envs/_base_task.py::get_obs/close_env`，初始化真实任务验证资源和三路相机。原入口需要启动完整评估，无法直接满足仅安装验收且不加载策略的需求。
+- 配置开关：只在手动执行检查脚本时检查文件；`--render` 默认关闭，关闭时不导入 SAPIEN/Torch/CuRobo 或占用 GPU。`--task-config` 默认 `demo_clean`，`--seed` 默认 0，只作用于诊断。官方配置由既有评估 `task_config` 字段选择，没有新增生产默认开关。
+- 输入输出：输入为当前 RoboTwin 配置和资源；`--output` 必须显式提供，输出检查 JSON，渲染启用时另输出原始三路 320x240 RGB PNG。诊断固定任务 `adjust_bottle`，禁用数据和视频保存；不调用策略或专家 rollout，没有 resize/crop/pad/归一化及动作 chunk 改动。
+- 兼容性：默认评估脚本、模型、动作执行和训练数据流不变；恢复缺失的官方依赖文件。机器人路径通过原模板替换机制适配当前绝对目录。
+- 验证方式：七个配置的固定 Git blob 摘要、全部下载 LFS SHA256 与 ZIP 完整性均通过；20,841 个解压文件存在且大小匹配，五种机器人、六个规划器配置、10,000 seen/1,000 unseen 纹理引用有效。seed 0 的 Clean/Randomized 真实任务初始化、原 CuRobo 规划器预热、三路 RGB 与 14 维状态检查均通过，并查看了六张截图；未执行策略 rollout。精确命令和结果见本次实验说明。
+- 已知限制：资源可用性检查不等于策略成功率；正式评估的 checkpoint、归一化统计及模型服务仍需单独核对。
+
+## ZR-0 LeRobot environment import repair
+
+- Date: 2026-09-07. Purpose: restore the model server's existing
+  `lerobot.common` imports in the ZR-0 Conda environment.
+- Source: direct reuse of this repository's already installed editable
+  `lerobot/` distribution (0.1.0), including
+  `lerobot/lerobot/common/datasets/lerobot_dataset.py::LeRobotDatasetMetadata`.
+  No package source, model, dataset, dependency version or training code changes.
+- Diagnosis: user-site LeRobot 0.4.4 took precedence over the correct editable
+  installation. The environment-local installation itself was intact.
+- Configuration: persist `PYTHONNOUSERSITE=1` using `conda env config vars set`
+  only for `/opt/data/private/lq/miniconda3/envs/ZR-0`. Activating this environment
+  disables user-site package loading and resolves LeRobot to the current repo.
+  This changes the environment's import policy, not model feature defaults.
+- Compatibility and disabling: installed packages, checkpoints and user-site
+  files are preserved. Deactivation restores user-site loading in base.
+  Explicitly unset the Conda variable to restore the previous import policy;
+  the original shadowing issue can then recur. Direct Python invocations without
+  activation need `PYTHONNOUSERSITE=1` or `-s`.
+- Inputs/outputs: existing local LIBERO demo metadata is used only for CPU
+  dependency diagnostics, through `resolve_dataset_spec` and
+  `prepare_action_expert_inputs_cpu`. No image preprocessing, action settings,
+  normalization statistics or production data flow is changed.
+- Validation and exact commands: see
+  `docs/experiments/zr0_lerobot_environment_20260907/experiment.md`. Checks cover
+  import origins, environment activation/deactivation, pip requirements,
+  server/policy imports, the existing metadata resolver and CPU input preparation.
+- Limitations: no model weights loaded, CUDA context, training or policy rollout.
+  RoboTwin normalization metadata and full evaluation remain separate work.
+
+## Docs 与 Evaluation 目录忽略规则
+
+- 日期：2026-09-07。
+- 修改目的：按用户要求忽略仓库根目录下 `docs/` 和 `evaluation/` 中尚未被 Git 跟踪的内容，同时保留既有文件及其跟踪状态。
+- 涉及文件：`.gitignore`、`reference.md`。
+- 配置开关：不适用；根目录忽略规则 `/docs/` 和 `/evaluation/` 始终生效。
+- 默认状态：两个目录中的未跟踪文件默认被 Git 忽略。
+- 实现来源：Git 标准忽略规则，无外部实现。
+- 具体设计：使用仓库根目录锚定的 `/docs/` 和 `/evaluation/` 目录规则；不执行索引取消跟踪操作。
+- 输入与输出：两个目录下未来新增且未显式强制加入的文件不会出现在普通 `git status` 或 `git add` 结果中；磁盘内容不变。
+- 与原有流程的关系：不改变训练、评估、模型、数据处理逻辑或既有 Git 跟踪状态，只改变未跟踪文件的默认可见性。
+- 关闭功能后的行为：删除对应忽略规则后，未跟踪文件会重新出现在 Git 状态中。
+- 验证方式：`git check-ignore` 命中两条根目录规则，暂存区不存在因本次操作产生的目录删除，并核对磁盘文件数量不变。
+- 已知限制：`.gitignore` 不影响已经跟踪或已经暂存的文件；这些文件后续发生修改时仍会被 Git 报告。

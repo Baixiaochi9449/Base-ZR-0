@@ -11,8 +11,10 @@ import torch
 
 
 class DatasetSeenTracker:
-    def __init__(self, concat_dataset, accelerator, *, resume_directory=None):
+    def __init__(self, concat_dataset, accelerator, *, resume_directory=None, flow_config=None):
         self.accelerator = accelerator
+        self.flow_config = flow_config
+        self.auxiliary_enabled = any(getattr(dataset.spec, "auxiliary_contract", None) for dataset in concat_dataset.datasets)
         self.entries = []
         for dataset_id, dataset in enumerate(concat_dataset.datasets):
             manifest = getattr(dataset, "manifest", None)
@@ -24,6 +26,7 @@ class DatasetSeenTracker:
                     "dataset_id": dataset_id,
                     "dataset_entry": dataset.spec.dataset_entry,
                     "source_frames": int(manifest["counts"]["source_frames"]),
+                    **({"unfiltered_length": getattr(dataset, "unfiltered_length", len(dataset)), "filtered_length": len(dataset)} if self.auxiliary_enabled else {}),
                 }
             )
         self.enabled = bool(self.entries)
@@ -32,6 +35,9 @@ class DatasetSeenTracker:
         self.duplicates = np.zeros(len(self.entries), dtype=np.int64)
         self.ar_eligible = np.zeros(len(self.entries), dtype=np.int64)
         self.fm_eligible = np.zeros(len(self.entries), dtype=np.int64)
+        self.aux_names = ["anchor", *[f"Q{i}_valid" for i in range(1, 10)], "flow_available", "flow_eligible",
+                          "flow_valid_pixels", "flow_missing", "flow_tail", "flow_empty_mask"]
+        self.aux_counts = np.zeros((len(self.entries), len(self.aux_names)), dtype=np.int64)
         self.bitsets = (
             [np.zeros(entry["source_frames"], dtype=bool) for entry in self.entries]
             if self.enabled and accelerator.is_main_process
@@ -52,6 +58,8 @@ class DatasetSeenTracker:
             raise ValueError("resume data seen state dataset contract mismatch")
         for name in ("seen", "unique", "duplicates", "ar_eligible", "fm_eligible"):
             setattr(self, name, payload[name].astype(np.int64))
+        if self.auxiliary_enabled:
+            self.aux_counts = payload["aux_counts"].astype(np.int64)
         for index, bitset in enumerate(self.bitsets):
             unpacked = np.unpackbits(payload[f"bitset_{index}"])[: len(bitset)]
             bitset[:] = unpacked.astype(bool)
@@ -73,6 +81,26 @@ class DatasetSeenTracker:
                 dim=1,
             )
             gathered = self.accelerator.gather(local).detach().cpu().numpy()
+            if self.auxiliary_enabled:
+                from utils.slot_labels import task_validity
+                device, size = local.device, len(local)
+                zero = torch.zeros(size, dtype=torch.long, device=device)
+                valid = task_validity(batch, device=device)
+                values = [batch.get("slot_anchor", zero).to(device), *[valid[f"Q{i}"] for i in range(1, 10)]]
+                available = batch.get("flow_supervision_available", zero).to(device)
+                eligible, pixels = zero.clone(), zero.clone()
+                if self.flow_config is not None and self.flow_config.enabled:
+                    from utils.optical_flow_loss import prepare_flow_targets
+                    indices, _, masks = prepare_flow_targets(batch, self.flow_config, device)
+                    eligible[indices] = 1
+                    pixels[indices] = masks.flatten(1).sum(1)
+                reasons = batch.get("flow_exclusion_reason", torch.full_like(zero, -1)).to(device)
+                values += [available, eligible, pixels, reasons == 1, reasons == 2, (available.bool() & ~eligible.bool())]
+                counters = torch.stack([value.long() for value in values], dim=1)
+                all_counts = self.accelerator.gather(counters).detach().cpu().numpy()
+                if self.accelerator.is_main_process:
+                    for row, counts in zip(gathered, all_counts):
+                        self.aux_counts[int(row[0])] += counts
             if not self.accelerator.is_main_process:
                 continue
             for dataset_id, global_index, ar_valid, fm_valid in gathered:
@@ -104,6 +132,7 @@ class DatasetSeenTracker:
                     "duplicate": int(self.duplicates[index]),
                     "ar_eligible_seen": int(self.ar_eligible[index]),
                     "fm_eligible_seen": int(self.fm_eligible[index]),
+                    **({"auxiliary": dict(zip(self.aux_names, self.aux_counts[index].tolist()))} if self.auxiliary_enabled else {}),
                     "seen_ratio": seen / total_seen if total_seen else 0.0,
                     "ar_eligible_ratio_within_seen": int(self.ar_eligible[index]) / seen if seen else 0.0,
                     "fm_eligible_ratio_within_seen": int(self.fm_eligible[index]) / seen if seen else 0.0,
@@ -141,4 +170,6 @@ class DatasetSeenTracker:
         arrays.update(
             {f"bitset_{index}": np.packbits(bitset) for index, bitset in enumerate(self.bitsets)}
         )
+        if self.auxiliary_enabled:
+            arrays["aux_counts"] = self.aux_counts
         np.savez_compressed(directory / "data_seen_state.npz", **arrays)

@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "datasets": {
+    "stage05_droid_partial_mixed": {
+      "aux_dataset_identity": "droid",
+      "ar_sidecar_path": "/opt/data/private/lq/ZR-0-artifacts/structured_slots_review3_v1/droid/aux",
+      "joint_sidecar_path": "/opt/data/private/lq/ZR-0-artifacts/structured_slots_review3_v1/droid/joint",
+      "flow_candidate_index": "/opt/data/private/lq/ZR-0-artifacts/structured_slots_review3_v1/droid/flow_candidates.npy"
+    },
+    "stage05_household_mixed": {
+      "aux_dataset_identity": "molmoact_household",
+      "ar_sidecar_path": "/opt/data/private/lq/ZR-0-artifacts/structured_slots_review3_v1/household/aux",
+      "joint_sidecar_path": "/opt/data/private/lq/ZR-0-artifacts/structured_slots_review3_v1/household/joint",
+      "flow_candidate_index": "/opt/data/private/lq/ZR-0-artifacts/structured_slots_review3_v1/household/flow_candidates.npy"
+    },
+    "stage05_tabletop_mixed": {
+      "aux_dataset_identity": "molmoact_tabletop",
+      "ar_sidecar_path": "/opt/data/private/lq/ZR-0-artifacts/structured_slots_review3_v1/tabletop/aux",
+      "joint_sidecar_path": "/opt/data/private/lq/ZR-0-artifacts/structured_slots_review3_v1/tabletop/joint",
+      "flow_candidate_index": "/opt/data/private/lq/ZR-0-artifacts/structured_slots_review3_v1/tabletop/flow_candidates.npy"
+    },
+    "stage05_rh20t_mixed": {
+      "aux_dataset_identity": "rh20t",
+      "ar_sidecar_path": "/opt/data/private/lq/ZR-0-artifacts/structured_slots_review3_v1/rh20t/aux",
+      "joint_sidecar_path": "/opt/data/private/lq/ZR-0-artifacts/structured_slots_review3_v1/rh20t/joint",
+      "flow_candidate_index": "/opt/data/private/lq/ZR-0-artifacts/structured_slots_review3_v1/rh20t/flow_candidates.npy"
+    }
+  }
+}

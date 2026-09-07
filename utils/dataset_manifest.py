@@ -132,6 +132,7 @@ def dataset_spec_to_manifest(
         "vision_input_contract": _jsonable(spec.vision_input_contract),
         "sidecar_sha256": spec.sidecar_sha256,
         "canonical_schema": _jsonable(spec.canonical_schema),
+        **({"auxiliary_contract": _jsonable(spec.auxiliary_contract)} if spec.auxiliary_contract is not None else {}),
     }
 
 

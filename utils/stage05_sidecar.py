@@ -61,9 +61,8 @@ def generator_identity(
         path = root / relative_path
         if not path.is_file():
             raise FileNotFoundError(f"missing Stage05 generator dependency: {path}")
-        dependencies.append(
-            {"relative_path": relative_path, "sha256": sha256_file(path)}
-        )
+        digest = sha256_file(path)
+        dependencies.append({"relative_path": relative_path, "sha256": digest})
     return {
         "scope": "joint" if build_joint else "ar_only",
         "dependencies": dependencies,
@@ -927,7 +926,9 @@ def load_stage05_sidecar(
         raise ValueError(f"Stage05 sidecar manifest hash mismatch: {path}")
     build_joint = bool(manifest.get("generation", {}).get("build_joint"))
     if manifest.get("generator_identity") != generator_identity(build_joint=build_joint):
-        raise ValueError(f"Stage05 sidecar generator is stale: {path}")
+        from utils.stage05_compatibility import verified_legacy_identity
+        if build_joint or not verified_legacy_identity(manifest.get("generator_identity"), generator_identity(build_joint=False), "ar_generator"):
+            raise ValueError(f"Stage05 sidecar generator is stale: {path}")
     _validate_generation_identity(manifest, path)
     if expected_generation is not None:
         for key, expected_value in expected_generation.items():

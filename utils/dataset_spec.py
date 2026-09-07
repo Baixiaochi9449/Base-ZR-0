@@ -58,10 +58,14 @@ def resolve_stage06_flow_contract(dataset_entry, entry, checkpoint_directory=Non
             path = Path(entry["optical_flow_data_root"]) / path
         payload = path.read_bytes()
         rows = [json.loads(line) for line in payload.splitlines() if line.strip()]
-        if not rows or any(row["camera_key"] != "observation.images.image" for row in rows):
+        if not rows:
             raise ValueError("Stage06 manifest is empty or has an invalid flow camera")
+        cameras = {row.get("camera_key") for row in rows}
+        if len(cameras) != 1 or not next(iter(cameras)):
+            raise ValueError("Stage06 manifest is empty or has an invalid flow camera")
+        flow_camera = next(iter(cameras))
         digest = hashlib.sha256(payload).hexdigest()
-        schema = {"flow_camera": "observation.images.image",
+        schema = {"flow_camera": flow_camera,
                   "flow_delta_frames": entry.get("flow_delta_frames", 10),
                   "flow_manifest_sha256": digest}
         vision = validate_stage06_image_contract(entry.get("vision_input_contract", qwen_image_input_contract()))
@@ -69,8 +73,9 @@ def resolve_stage06_flow_contract(dataset_entry, entry, checkpoint_directory=Non
         raise ValueError("Stage06 requires a flow manifest or checkpoint dataset contract")
     if (not isinstance(digest, str) or len(digest) != 64 or not isinstance(schema, dict)
             or schema.get("flow_manifest_sha256") != digest
-            or schema.get("flow_camera") != "observation.images.image"
-            or schema.get("flow_delta_frames") != 10):
+            or not isinstance(schema.get("flow_camera"), str)
+            or not schema.get("flow_camera")
+            or int(schema.get("flow_delta_frames", -1)) != int(entry.get("flow_delta_frames", schema.get("flow_delta_frames", -1)))):
         raise ValueError("Stage06 checkpoint/manifest has an invalid flow provenance contract")
     return {"sidecar_sha256": digest, "canonical_schema": schema,
             "vision_input_contract": vision}
@@ -200,6 +205,7 @@ class ResolvedDatasetSpec:
     vision_input_contract: dict[str, Any] | None = None
     sidecar_sha256: str | None = None
     canonical_schema: dict[str, Any] | None = None
+    auxiliary_contract: dict[str, Any] | None = None
 
 
 def resolve_dataset_adapter_name(entry: dict[str, Any]) -> str:

@@ -11,7 +11,11 @@ def prepare_flow_targets(batch, config, device):
     for index in range(batch_size):
         if available is None or not bool(available[index]):
             continue
-        if int(batch["flow_actual_delta_frames"][index]) != config.flow_delta_frames or int(batch["flow_label_source"][index]) != 1:
+        nominal = batch.get("flow_nominal_delta_frames")
+        expected_delta = int(nominal[index]) if nominal is not None else config.flow_delta_frames
+        if expected_delta <= 0:
+            raise ValueError("invalid per-source flow nominal delta")
+        if int(batch["flow_actual_delta_frames"][index]) != expected_delta or int(batch["flow_label_source"][index]) != 1:
             continue
         target = batch["flow_target"][index].to(device=device, dtype=torch.float32)
         mask = batch["flow_valid_mask"][index].to(device=device, dtype=torch.float32)

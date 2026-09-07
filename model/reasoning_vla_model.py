@@ -87,7 +87,7 @@ class ZR0Model(nn.Module):
             vlm_name_or_path: str,
             action_expert_name_or_path: str,
             action_expert_config: FlowmatchingActionHeadConfig,
-            tune_vlm=True,
+            tune_vlm=None,
             tune_action_expert=True,
             detach_vlm_outputs_for_action_expert=False,
             lora_args=None,
@@ -100,6 +100,8 @@ class ZR0Model(nn.Module):
             action_expert_config_path=None,
             training_stage=None,
             slot_aux_type="none",
+            slot_config=None,
+            slot_supervision_stats=None,
             optical_flow_config=None,
             init_from_checkpoint=None,
             resume_from_checkpoint=None,
@@ -115,18 +117,38 @@ class ZR0Model(nn.Module):
             vlm_name_or_path = source
         resume_training = resume_training or bool(resume_from_checkpoint)
         self.training_stage = training_stage
+        if tune_vlm is None:
+            tune_vlm = training_stage != "stage2_aux"
+        from utils.slot_config import SlotConfig, resolve_query_layout
+        from utils.slot_checkpoint import resolve_slot_checkpoint, validate_slot_stats
+        requested_slot = slot_config
+        if requested_slot is None and slot_aux_type != "none":
+            raise ValueError("enabled slot_aux_type requires SlotConfig with explicit positive loss weight")
+        self.slot_config, slot_payload = resolve_slot_checkpoint(
+            vlm_name_or_path if training_stage is not None else None, requested_slot, resume=resume_training,
+            stage=training_stage, initialize=bool(init_from_checkpoint))
+        slot_aux_type = self.slot_config.slot_aux_type
         self.optical_flow_config, flow_payload = resolve_flow_checkpoint(
             vlm_name_or_path if training_stage is not None else None,
-            optical_flow_config, stage=training_stage, resume=resume_training)
-        loss_type = resolve_stage(training_stage, loss_type, flow=self.optical_flow_config, slot_aux_type=slot_aux_type)
-        self.stage_description = stage_description(training_stage, self.optical_flow_config)
+            optical_flow_config, stage=training_stage, resume=resume_training, initialize=bool(init_from_checkpoint))
+        loss_type = resolve_stage(training_stage, loss_type, flow=self.optical_flow_config, slot=self.slot_config)
+        if slot_supervision_stats is not None and slot_payload is not None and slot_supervision_stats != slot_payload["statistics"]:
+            raise ValueError("requested Slot statistics conflict with checkpoint")
+        self.slot_supervision_stats = slot_payload["statistics"] if slot_payload else slot_supervision_stats
+        if self.slot_config.enabled:
+            if self.slot_supervision_stats is None:
+                raise ValueError("Slot requires audited fixed train statistics")
+            validate_slot_stats(self.slot_supervision_stats, self.slot_config)
+        if self.slot_config.enabled and not resume_training and not init_from_checkpoint:
+            raise ValueError("Slot stages require explicit init_from_checkpoint or same-stage resume")
+        self.stage_description = stage_description(training_stage, self.optical_flow_config, slot_aux_type)
         self.source_stage_training_state = (read_stage_training_state(flow_payload, OpticalFlowConfig(**flow_payload["config"]))
                                             if flow_payload else None)
         self.stage_training_state = None
         if training_stage is not None:
             self.stage_training_state = (dict(self.source_stage_training_state)
                 if resume_training and self.source_stage_training_state is not None
-                else initial_stage_training_state(training_stage, self.optical_flow_config))
+                else initial_stage_training_state(training_stage, self.optical_flow_config, slot_aux_type))
         if resume_training and training_stage == "stage3_joint":
             if action_expert_name_or_path and Path(action_expert_name_or_path).resolve() != Path(vlm_name_or_path).resolve():
                 raise ValueError("stage3 resume requires Expert weights from the same checkpoint")
@@ -349,6 +371,10 @@ class ZR0Model(nn.Module):
             difference_query_config.num_difference_queries
         )
         self.vlm_attention_backend = difference_query_config.attention_backend
+        self.query_role_layout = resolve_query_layout(self.num_difference_queries, self.optical_flow_config.num_flow_queries,
+                                                      slot_enabled=self.slot_config.enabled, query_enabled=self.use_difference_query)
+        if slot_payload and self.query_role_layout != slot_payload["query_layout"]:
+            raise ValueError("Slot checkpoint query role layout conflict")
         if self.optical_flow_config.enabled and (
             not self.use_difference_query or self.optical_flow_config.num_flow_queries > self.num_difference_queries
         ):
@@ -378,11 +404,19 @@ class ZR0Model(nn.Module):
                     torch.random.default_generator.manual_seed(action_expert_init_seed)
                     self.action_expert = FlowmatchingActionHead(self.action_expert_config, tune_action_expert)
         self.optical_flow_aux = None
+        self.slot_aux = None
         if training_stage is not None:
             before = {"vlm": module_checksum(self.backbone.model),
                       "query": module_checksum(self.backbone.difference_query) if self.use_difference_query else None}
             self.optical_flow_aux = build_optical_flow_head(actual_vlm_hidden_size, self.optical_flow_config)
-            load_flow_weights(self.optical_flow_aux, vlm_name_or_path, flow_payload)
+            if self.optical_flow_config.enabled:
+                load_flow_weights(self.optical_flow_aux, vlm_name_or_path, flow_payload)
+            if self.slot_config.enabled:
+                from model.structured_slot_head import build_slot_head
+                from utils.slot_checkpoint import load_slot_weights
+                self.slot_aux = build_slot_head(actual_vlm_hidden_size, self.query_role_layout["num_slot_queries"], self.slot_config)
+                load_slot_weights(self.slot_aux, vlm_name_or_path, slot_payload)
+                print("Slot Head parameter count:", sum(p.numel() for p in self.slot_aux.parameters()))
             after = {"vlm": module_checksum(self.backbone.model),
                      "query": module_checksum(self.backbone.difference_query) if self.use_difference_query else None}
             if before != after:
@@ -782,15 +816,26 @@ class ZR0Model(nn.Module):
             compute_vlm_loss=resolved_loss_type in ("vlm", "vlm_and_action"),
         )
         flow_outputs = None
+        slot_outputs = None
+        if getattr(self, "slot_aux", None) is not None:
+            from utils.slot_loss import slot_loss
+            query_states = backbone_outputs["backbone_embeddings"][:, -self.num_difference_queries:, :]
+            slot_outputs = slot_loss(self.slot_aux(query_states), batch_inputs, self.slot_config, self.slot_supervision_stats)
         if getattr(self, "optical_flow_aux", None) is not None:
             from utils.optical_flow_loss import optical_flow_loss
             prediction = self.optical_flow_aux(backbone_outputs["backbone_embeddings"][:, -self.optical_flow_config.num_flow_queries:, :])
             flow_outputs = optical_flow_loss(prediction, batch_inputs, self.optical_flow_config)
         if resolved_loss_type == "aux":
-            weighted = self.optical_flow_config.optical_flow_loss_weight * flow_outputs["optical_flow_loss"]
-            return BatchFeature({**flow_outputs, "loss": weighted, "total_loss": weighted,
+            weighted = backbone_outputs["backbone_embeddings"].sum() * 0
+            if flow_outputs is not None:
+                weighted = weighted + self.optical_flow_config.optical_flow_loss_weight * flow_outputs["optical_flow_loss"]
+            if slot_outputs is not None:
+                weighted = weighted + slot_outputs["slot_loss_weighted"]
+            return BatchFeature({**(flow_outputs or {}), **(slot_outputs or {}), "loss": weighted, "total_loss": weighted,
                                  **stage_loss_metadata(self.training_stage,
-                                     flow=flow_outputs["optical_flow_loss_count"] > 0)})
+                                     slot=slot_outputs is not None and slot_outputs["slot_valid_samples"] > 0,
+                                     slot_enabled=getattr(getattr(self, "slot_config", None), "enabled", False),
+                                     flow=flow_outputs is not None and flow_outputs["optical_flow_loss_count"] > 0)})
         vlm_loss = backbone_outputs.get("vlm_loss")
         ar_loss_count = None
         ar_loss_sum = None
@@ -859,7 +904,13 @@ class ZR0Model(nn.Module):
             result["loss"] = result["loss"] + self.optical_flow_config.optical_flow_loss_weight * flow_outputs["optical_flow_loss"]
             result["total_loss"] = result["loss"]
         if getattr(self, "training_stage", None):
+            if slot_outputs is not None:
+                result.update(slot_outputs)
+                result["loss"] = result["loss"] + slot_outputs["slot_loss_weighted"]
+                result["total_loss"] = result["loss"]
             result.update(stage_loss_metadata(self.training_stage,
+                slot=slot_outputs is not None and slot_outputs["slot_valid_samples"] > 0,
+                slot_enabled=getattr(getattr(self, "slot_config", None), "enabled", False),
                 ar=ar_loss_count is not None and ar_loss_count > 0,
                 flow=flow_outputs is not None and flow_outputs["optical_flow_loss_count"] > 0,
                 fm=flow_matching_loss_count > 0))
@@ -872,6 +923,8 @@ class ZR0Model(nn.Module):
     def save_pretrained(self, save_directory):
         os.makedirs(save_directory, exist_ok=True)
         if getattr(self, "training_stage", None) is not None:
+            from utils.slot_checkpoint import save_slot_artifacts
+            save_slot_artifacts(self, save_directory)
             save_flow_artifacts(self, save_directory)
         # save backbone model parameter and model config (Qwen-VL)
         self.backbone.model.save_pretrained(save_directory)
@@ -985,7 +1038,10 @@ class ZR0Model(nn.Module):
             },
         }
         if getattr(self, "training_stage", None):
-            metadata.update(**checkpoint_stage_metadata(self), slot_aux_type="none")
+            metadata.update(checkpoint_stage_metadata(self))
+            metadata.update(slot_aux_type=self.slot_config.slot_aux_type, query_role_layout=self.query_role_layout)
+            metadata.update(slot_runtime_config=self.slot_config.to_dict(),
+                            slot_runtime_config_sha256=_canonical_json_hash(self.slot_config.to_dict()))
         if generic_contract is not None:
             metadata["action_expert_contract"] = generic_contract
         if is_stage05_ar or is_stage05_joint:
@@ -1032,6 +1088,8 @@ class ZR0Model(nn.Module):
         resume_training=False,
         training_stage=None,
         optical_flow_config=None,
+        slot_config=None,
+        slot_supervision_stats=None,
         init_from_checkpoint=None,
         resume_from_checkpoint=None,
         action_expert_name_or_path=None,
@@ -1056,6 +1114,7 @@ class ZR0Model(nn.Module):
                 use_difference_query=use_difference_query, num_difference_queries=num_difference_queries,
                 vlm_attention_backend=vlm_attention_backend, loss_type=loss_type,
                 training_stage=training_stage, optical_flow_config=optical_flow_config,
+                slot_config=slot_config, slot_supervision_stats=slot_supervision_stats,
                 init_from_checkpoint=init_from_checkpoint, resume_from_checkpoint=resume_from_checkpoint,
                 resume_training=resume_training)
         loss_type = loss_type or "vlm_and_action"

@@ -697,13 +697,29 @@ def build_concat_streaming_dataset(
     optical_flow_config=None,
     optical_flow_data_root=None,
     optical_flow_manifest=None,
+    slot_config=None,
+    slot_reader=None,
+    aux_dataset_config=None,
 ):
+    auxiliary_entries = None
+    # An explicit route selects the production datasets/sidecars independently
+    # of auxiliary objective switches.  Readers and label access remain gated
+    # by the effective enabled flags below.
+    if aux_dataset_config is not None:
+        payload = json.loads(Path(aux_dataset_config).read_text())
+        if not isinstance(payload, dict) or payload.get("version") != 1:
+            raise ValueError("unsupported auxiliary dataset configuration")
+        auxiliary_entries = payload.get("datasets")
+        if not isinstance(auxiliary_entries, dict) or not auxiliary_entries:
+            raise ValueError("auxiliary dataset configuration requires nonempty datasets routes")
     if dataset_sample_ratios is not None and len(dataset_sample_ratios) != len(dataset_entries):
         raise ValueError("dataset_sample_ratios must have the same length as dataset_entries")
     if optical_flow_config is not None and optical_flow_config.enabled and not any(
-        DATASET2FEATURE.get(name, {}).get("dataset_adapter") == "stage06_libero_flow" for name in dataset_entries
+        DATASET2FEATURE.get(name, {}).get("optical_flow_manifest")
+        or DATASET2FEATURE.get(name, {}).get("dataset_adapter") == "stage06_libero_flow"
+        for name in dataset_entries
     ):
-        raise ValueError("enabled OF requires a stage06_libero_flow dataset entry")
+        raise ValueError("enabled OF requires a registered per-dataset flow manifest")
     selected_entries = []
     needs_fast = False
     for dataset_id, dataset_entry in enumerate(dataset_entries):
@@ -711,6 +727,19 @@ def build_concat_streaming_dataset(
             raise ValueError(f"Unknown dataset entry {dataset_entry!r}")
         entry = dict(DATASET2FEATURE[dataset_entry])
         entry["dataset_entry"] = dataset_entry
+        if auxiliary_entries is not None:
+            if dataset_entry not in auxiliary_entries:
+                raise ValueError(f"auxiliary dataset route missing: {dataset_entry}")
+            route = auxiliary_entries[dataset_entry]
+            if not isinstance(route, dict) or not route:
+                raise ValueError(f"invalid auxiliary dataset route: {dataset_entry}")
+            entry.update(route)
+        entry["flow_enabled"] = bool(optical_flow_config is not None and optical_flow_config.enabled)
+        entry["slot_enabled"] = bool(slot_config is not None and slot_config.enabled)
+        if optical_flow_config is not None and optical_flow_config.enabled and entry.get("optical_flow_manifest"):
+            entry.update(optical_flow_data_root=entry.get("optical_flow_data_root", optical_flow_data_root),
+                         optical_flow_manifest=entry.get("optical_flow_manifest", optical_flow_manifest),
+                         flow_delta_frames=entry.get("flow_delta_frames", optical_flow_config.flow_delta_frames))
         if entry.get("dataset_adapter") == "stage06_libero_flow":
             if optical_flow_config is None or not optical_flow_config.enabled:
                 raise ValueError("stage06_flow dataset requires explicitly enabled OF")
@@ -859,9 +888,14 @@ def build_concat_streaming_dataset(
             )
         if accelerator is not None:
             accelerator.wait_for_everyone()
+        if slot_config is not None and slot_config.enabled:
+            from utils.slot_supervision import SlotSupervisedDataset
+            ds = SlotSupervisedDataset(ds, slot_reader, slot_config, optical_flow_config)
         datasets.append(ds)
 
     concat = ConcatDataset(datasets)
+    if not len(concat):
+        raise ValueError("selected datasets contain no eligible supervision samples")
     concat.resolved_dataset_manifest = build_resolved_dataset_manifest(
         [dataset.spec for dataset in datasets], loss_type
     )
@@ -892,6 +926,11 @@ def custom_collate_fn(batch):
     if any('labels' in item for item in batch):
         keys.add('labels')
     result = {}
+    if any(any(k.startswith("slot_Q") for k in item) for item in batch):
+        from utils.slot_labels import empty_slot_labels
+        for key, default in empty_slot_labels().items():
+            result[key] = torch.stack([item.get(key, default) for item in batch])
+            keys.discard(key)
     flow_keys = {key for item in batch for key in item if key.startswith("flow_")}
     if flow_keys:
         for key in flow_keys:
@@ -1193,3 +1232,12 @@ def create_dataloader_for_concat(
     dataloader = DataLoader(**kwargs)
 
     return dataloader
+
+
+def set_dataloader_epoch(dataloader, epoch_sampler, epoch):
+    epoch_sampler.set_epoch(epoch)
+    # Accelerate resets the sampler from its own iteration at __iter__ entry.
+    # A fresh resumed loader must therefore receive the saved epoch as well.
+    set_epoch = getattr(dataloader, "set_epoch", None)
+    if callable(set_epoch):
+        set_epoch(epoch)
