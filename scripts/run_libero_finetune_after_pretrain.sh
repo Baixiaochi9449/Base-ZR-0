@@ -91,8 +91,14 @@ PY
 }
 
 gpus_are_free() {
-    nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits \
-        | awk 'BEGIN {count=0; ok=1} {count += 1; if ($2 + 0 < 71680) ok=0} END {exit !(count >= 4 && ok)}'
+    local gate_result
+    gate_result=$(PYTHONPATH="$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" -m utils.gpu_resource_gate \
+        --visible-devices "${ZR0_CUDA_VISIBLE_DEVICES:-0,1,2,3}" --log "$FULL_LOG_DIR/gpu_gate.jsonl") || return
+    printf '%s\n' "$gate_result"
+    ZR0_CUDA_VISIBLE_DEVICES=$("$PYTHON_BIN" -c \
+        'import json,sys; print(json.loads(sys.argv[1])["cuda_visible_devices"])' "$gate_result") || return
+    export ZR0_CUDA_VISIBLE_DEVICES
+    export CUDA_VISIBLE_DEVICES="$ZR0_CUDA_VISIBLE_DEVICES"
 }
 
 wait_count=0
@@ -104,14 +110,7 @@ until final_checkpoint_ready; do
     sleep "$POLL_SECONDS"
 done
 
-wait_count=0
-until gpus_are_free; do
-    if (( wait_count % 10 == 0 )); then
-        printf '[%s] final checkpoint exists; waiting for GPUs 0-3 to have at least 70 GiB free\n' "$(date --iso-8601=seconds)"
-    fi
-    wait_count=$((wait_count + 1))
-    sleep "$POLL_SECONDS"
-done
+gpus_are_free
 
 printf '[%s] final checkpoint and GPU gates passed; starting LIBERO preflight\n' "$(date --iso-8601=seconds)"
     ZR0_LIBERO_ACTION_HORIZON="$FINETUNE_ACTION_HORIZON" \
@@ -130,6 +129,7 @@ smoke_run_name="libero-dq32-tabletop-v3-joint-init-smoke-$timestamp"
 smoke_log="$FULL_LOG_DIR/$smoke_run_name.log"
 
 printf '[%s] starting isolated real smoke: %s\n' "$(date --iso-8601=seconds)" "$smoke_output"
+gpus_are_free
 ZR0_OUTPUT_DIR="$smoke_output" \
 ZR0_MAX_TRAIN_STEPS=2 \
 ZR0_SAVE_STEP_INTERVAL=1 \
@@ -138,6 +138,7 @@ ZR0_RUN_NAME="$smoke_run_name" \
     bash "$ROOT_DIR/scripts/run_libero_wo_ecot_pt.sh" train difference_query_pretrained \
     2>&1 | tee -a "$smoke_log"
 
+gpus_are_free
 ZR0_OUTPUT_DIR="$smoke_output" \
 ZR0_MAX_TRAIN_STEPS=3 \
 ZR0_SAVE_STEP_INTERVAL=1 \
@@ -235,6 +236,7 @@ formal_timestamp=$(date +%Y%m%d-%H%M%S)
 formal_run_name="qwen3vl2b-libero-wo-ecot-dq32-tabletop-v3-joint-init-seed42-$formal_timestamp"
 formal_log="$FULL_LOG_DIR/$formal_run_name.log"
 printf '[%s] smoke/resume passed; starting formal LIBERO fine-tuning\n' "$(date --iso-8601=seconds)"
+gpus_are_free
 ZR0_RUN_NAME="$formal_run_name" \
     bash "$ROOT_DIR/scripts/run_libero_wo_ecot_pt.sh" train difference_query_pretrained \
     2>&1 | tee -a "$formal_log"

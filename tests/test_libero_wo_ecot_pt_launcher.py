@@ -100,6 +100,13 @@ class LiberoWoEcotPtLauncherTest(unittest.TestCase):
         self.assertIn("--wandb_run_id test1234", command)
         self.assertIn("--wandb_resume must", command)
 
+    def test_train_and_resume_preserve_resource_gate_uuid_selection(self):
+        identities = "GPU-2,GPU-0,GPU-3,GPU-1"
+        for mode in ("train", "resume"):
+            result = self.run_launcher(mode, extra_env={"ZR0_CUDA_VISIBLE_DEVICES": identities})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"CUDA_VISIBLE_DEVICES={identities}", shlex.split(result.stdout))
+
     def test_pretrained_arm_warm_starts_complete_joint_checkpoint(self):
         source = ROOT / "outputs" / "pretrain" / "tabletop_v3_dq32_joint_gbs128_seed42_mbs16_gas2" / "step-19424"
         result = self.run_launcher("train", arm="difference_query_pretrained")

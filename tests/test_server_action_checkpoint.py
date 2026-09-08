@@ -4,6 +4,27 @@ from unittest.mock import Mock
 import pytest
 
 
+@pytest.mark.parametrize("allow_legacy", [False, True])
+def test_server_forwards_explicit_legacy_manifest_choice(monkeypatch, allow_legacy):
+    import server as server_module
+
+    arguments = ["--dataset_entry", "fixture", "--ckpt_dir", "/tmp/legacy",
+                 "--inference_mode", "direct_action"]
+    if allow_legacy:
+        arguments.append("--allow_legacy_checkpoint_without_manifest")
+    options = server_module.parse_option(arguments)
+    factory = Mock(return_value=object())
+    serving = Mock()
+    monkeypatch.setattr(server_module, "parse_option", lambda: options)
+    monkeypatch.setattr(server_module, "set_all_seeds", lambda *_: None)
+    monkeypatch.setattr(server_module, "ZR0Policy", factory)
+    monkeypatch.setattr(server_module, "WebsocketPolicyServer", Mock(return_value=serving))
+    server_module.deploy()
+    assert factory.call_args.kwargs["allow_legacy_checkpoint_without_manifest"] is allow_legacy
+    assert factory.call_args.kwargs["allow_legacy_checkpoint_without_observation_contract"] is False
+    serving.serve_forever.assert_called_once_with()
+
+
 @pytest.mark.parametrize("checkpoint_kind", ["action_only", "joint"])
 def test_server_delegates_action_capable_checkpoint_to_policy(monkeypatch, checkpoint_kind):
     import server as server_module

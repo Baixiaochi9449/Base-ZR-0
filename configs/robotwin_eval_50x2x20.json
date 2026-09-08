@@ -1,0 +1,20 @@
+{
+  "experiment": "robotwin_50x2x20_seed0",
+  "expected_task_count": 50,
+  "task_configs": ["demo_clean", "demo_randomized"],
+  "client": {
+    "policy_name": "ZR0",
+    "n_episodes": 20,
+    "n_action_steps": 16,
+    "seed": 0,
+    "instruction_type": "unseen",
+    "host": "127.0.0.1",
+    "port": 8022,
+    "ckpt_setting": "zr0_local_stats_e20"
+  },
+  "checkpoint": "/opt/data/private/lq/models/ZR-0-RoboTwin2.0-Aloha-AgileX",
+  "dataset_entry": "demo_data.robotwin2.0-aloha-agilex",
+  "statistics": "demo_data/robotwin2.0-aloha-agilex/meta/stats.json",
+  "checkpoint_statistics_match_verified": false,
+  "experiment_doc": "docs/experiments/robotwin_eval_50x2x20_20260907/experiment.md"
+}

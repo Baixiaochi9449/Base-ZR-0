@@ -34,12 +34,15 @@ def test_resume_preflight_keeps_experiment_cuda_visible(tmp_path, monkeypatch, p
     snapshot.mkdir()
     (snapshot / "zr0_checkpoint_metadata.json").touch()
     calls = []
-    monkeypatch.setattr(runner, "resource_gate", lambda: calls.append("resources"))
+    def gate(output, env):
+        calls.append("resources")
+        return {"cuda_visible_devices": "GPU-a,GPU-b,GPU-c,GPU-d"}
+    monkeypatch.setattr(runner, "resource_gate", gate)
     monkeypatch.setattr(runner, "record", lambda *args, **kwargs: None)
 
     def preflight(command, *, cwd, env, check):
         assert calls == ["resources"]
-        assert env["CUDA_VISIBLE_DEVICES"] == "0,1,2,3"
+        assert env["CUDA_VISIBLE_DEVICES"] == "GPU-a,GPU-b,GPU-c,GPU-d"
         assert env["PYTHONNOUSERSITE"] == "1"
         assert command[command.index("--purpose") + 1] == f"stage05_{phase}_resume"
         assert "--validate-resume-artifacts" in command
@@ -105,7 +108,7 @@ def test_ar_gate_continuation_skips_probes_and_stops_on_failure(tmp_path, monkey
                 stream.write(json.dumps({"stage": "ar-resume", "status": "failed", "log": str(failed_log)}) + "\n")
     monkeypatch.setattr(runner.sys, "argv", argv)
     monkeypatch.setattr(runner, "source_identity", lambda: identity)
-    monkeypatch.setattr(runner, "resource_gate", lambda: None)
+    monkeypatch.setattr(runner, "resource_gate", lambda *args: None)
     monkeypatch.setattr(runner, "record", lambda *args, **kwargs: None)
     monkeypatch.setattr(runner.subprocess, "check_output", lambda *args, **kwargs: "fixture\n" if kwargs.get("text") else b"fixture\n")
     fixtures = []

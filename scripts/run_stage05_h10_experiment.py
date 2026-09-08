@@ -2,7 +2,6 @@
 """Sequential, failure-stopping launch of the authorized H10 experiment."""
 
 import argparse
-import csv
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -21,6 +20,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON = "/opt/data/private/lq/miniconda3/envs/ZR-0/bin/python"
 LAUNCHER = ROOT / "scripts/run_stage05_four_dataset_pretraining.sh"
+OWNED_CHILDREN = []
 
 
 class ProbeOOM(RuntimeError):
@@ -45,28 +45,23 @@ def record(output, stage, **details):
     print(json.dumps(event, sort_keys=True), flush=True)
 
 
-def resource_gate():
-    rows = list(csv.reader(subprocess.check_output([
-        "nvidia-smi", "--query-gpu=index,uuid,memory.free,utilization.gpu", "--format=csv,noheader,nounits"
-    ], text=True).splitlines()))
-    selected = {row[1].strip(): row for row in rows if int(row[0]) in (0, 1, 2, 3)}
-    if len(selected) != 4:
-        raise RuntimeError("expected four GPUs 0,1,2,3")
-    processes = list(csv.reader(subprocess.check_output([
-        "nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_memory", "--format=csv,noheader,nounits"
-    ], text=True).splitlines()))
-    occupied = [row for row in processes if row and row[0].strip() in selected]
-    if occupied:
-        raise RuntimeError(f"requested GPUs already occupied: {occupied}")
-    if any(int(row[2]) < 71680 or int(row[3]) > 0 for row in selected.values()):
-        raise RuntimeError(f"GPU availability gate failed: {list(selected.values())}")
+def resource_gate(output=None, env=None):
+    from utils.gpu_resource_gate import wait_for_gpus
+
+    env = dict(os.environ if env is None else env)
+    env["CUDA_VISIBLE_DEVICES"] = env.get("ZR0_CUDA_VISIBLE_DEVICES", "0,1,2,3")
+    result = wait_for_gpus(env=env, expected_count=4, children=OWNED_CHILDREN,
+                          process_groups=[child.pid for child in OWNED_CHILDREN],
+                          log_path=Path(output or ROOT / "outputs") / "gpu_gate.jsonl")
     if shutil.disk_usage(ROOT / "outputs").free < 1024**4:
         raise RuntimeError("less than the reserved 1 TiB checkpoint budget is available")
+    return result
 
 
 def source_identity():
     paths = [ROOT / "train_vla.py", LAUNCHER, Path(__file__).resolve(),
-             ROOT / "scripts/stage05_experiment_train.py"]
+             ROOT / "scripts/stage05_experiment_train.py",
+             ROOT / "lerobot/lerobot/common/datasets/video_utils.py"]
     for directory in ("model", "utils"):
         paths.extend(sorted((ROOT / directory).glob("*.py")))
     return {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
@@ -145,13 +140,15 @@ def select_token_audit(output, processor_path, env):
 
 
 def launch(output, stage, env, *, probe=False):
-    resource_gate()
+    gate = resource_gate(output, env)
+    env = {**env, "CUDA_VISIBLE_DEVICES": gate["cuda_visible_devices"],
+           "ZR0_CUDA_VISIBLE_DEVICES": gate["cuda_visible_devices"]}
     expected = json.loads(Path(env.get("ZR0_RUNNER_SOURCE_IDENTITY", output / "source_identity.json")).read_text())
     if source_identity() != expected:
         raise RuntimeError("training source files changed after this experiment was launched")
     if env.get("ZR0_SELECT_PROCESSOR_AUDIT") == "1":
         env = select_token_audit(output, env["ZR0_INITIAL_CHECKPOINT"], env)
-        resource_gate()
+        resource_gate(output, env)
     run_dir = Path(env["ZR0_RUN_OUTPUT_DIR"])
     suffix = f".{env['ZR0_CONTINUATION_ID']}" if env.get("ZR0_CONTINUATION_ID") else ""
     outer_log = output / (run_dir.relative_to(output).as_posix().replace("/", "_") + f".{stage}{suffix}.log")
@@ -162,6 +159,7 @@ def launch(output, stage, env, *, probe=False):
     with outer_log.open("x") as stream:
         child = subprocess.Popen(command, cwd=ROOT, env=env, stdout=stream,
                                  stderr=subprocess.STDOUT, start_new_session=True)
+        OWNED_CHILDREN.append(child)
         record(output, stage, status="running", pid=child.pid, process_group=child.pid)
         try:
             code = child.wait()
@@ -239,9 +237,9 @@ def verify_run(output, run_dir, expected_step, phase, env):
                "--external-config", env["ZR0_ACTION_EXPERT_CONFIG_PATH"],
                "--action-horizon", env["ZR0_ACTION_HORIZON"], "--action-dim", "64", "--state-dim", "64",
                "--num-difference-queries", "32"]
-    resource_gate()
+    gate = resource_gate(output, env)
     # DeepSpeed deserialization imports Triton; tensor loading remains on CPU.
-    subprocess.run(command, cwd=ROOT, env={**env, "CUDA_VISIBLE_DEVICES": "0,1,2,3"}, check=True)
+    subprocess.run(command, cwd=ROOT, env={**env, "CUDA_VISIBLE_DEVICES": gate["cuda_visible_devices"]}, check=True)
     for filename in ("data_seen_state.npz", "resolved_dataset_manifest.json", "scheduler.pt"):
         if not (checkpoint / filename).is_file():
             raise RuntimeError(f"missing checkpoint artifact: {checkpoint / filename}")
@@ -324,7 +322,7 @@ def main():
             if (not args.processor_audits or failed.get("status") != "failed"
                     or "processor/tokenizer files identity changed" not in Path(failed["log"]).read_text()):
                 raise RuntimeError("continuation requires the recorded processor-audit failure")
-        resource_gate()
+        resource_gate(output)
         started = output / f"runner_{args.continuation_id}.json"
         identity_path = output / f"source_identity_{args.continuation_id}.json"
     with started.open("x") as stream:
@@ -354,8 +352,10 @@ def main():
                 "ZR0_ACTION_EXPERT_CONFIG_PATH": str(output / "action_expert_config.json"),
                 "ZR0_ACTION_HORIZON": str(config["action_horizon"]), "ZR0_MAX_LENGTH": str(config["max_length"]),
                 "ZR0_EXPECTED_GLOBAL_BATCH_SIZE": str(config["global_batch_size"]),
-                "ZR0_NUM_GPUS": "4", "ZR0_CUDA_VISIBLE_DEVICES": "0,1,2,3",
-                "CUDA_VISIBLE_DEVICES": "0,1,2,3", "ZR0_RUNNER_SOURCE_IDENTITY": str(identity_path),
+                "ZR0_NUM_GPUS": "4",
+                "ZR0_CUDA_VISIBLE_DEVICES": os.environ.get("ZR0_CUDA_VISIBLE_DEVICES", "0,1,2,3"),
+                "CUDA_VISIBLE_DEVICES": os.environ.get("ZR0_CUDA_VISIBLE_DEVICES", "0,1,2,3"),
+                "ZR0_RUNNER_SOURCE_IDENTITY": str(identity_path),
                 "ZR0_WANDB_PROJECT": config["wandb_project"], "ZR0_WANDB_GROUP": config["experiment"],
                 "ZR0_ALLOW_FORMAL_TRAINING": "1"}
     if args.processor_audits:

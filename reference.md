@@ -1,5 +1,17 @@
 # Implementation Reference
 
+## PyAV decoder ownership and bounded GPU resource gates
+
+- Date: 2026-09-07. Purpose: prevent delayed AV1 decoder-thread release and replace single GPU-utilization snapshots with bounded, recorded availability checks before sequential launches.
+- Files/interfaces: `lerobot/lerobot/common/datasets/video_utils.py::{resolve_pyav_threads,decode_video_frames_pyav,decode_video_frames,decode_video_frames_torchvision}`; `utils/gpu_resource_gate.py::{GPUResourcePolicy,wait_for_gpus,cuda_device_identities}`; H10 runner `resource_gate/launch/verify_run`, standalone `audit_stage05_gpu_gate.py`, LIBERO sequencer gates and `run_libero_wo_ecot_pt.sh` device selection. Diagnostics: `scripts/audit_video_decode_resources.py`, `scripts/audit_gpu_probe_exit.py`; tests: `test_video_decode_resources.py`, `test_gpu_resource_gate.py`, existing H10 and LIBERO launcher tests.
+- Source: adapt the existing local LeRobot timestamp/nearest-frame/RGB pipeline and existing H10 resource thresholds. Custom public-PyAV ownership helper is needed because installed torchvision's PyAV VideoReader ignores num_threads and offers no public reader cleanup. Custom shared GPU polling replaces two one-shot checks and a memory-only unbounded wait; no external algorithm or framework is added. Installed PyAV12.3.0/torchvision0.21 APIs and upstream PyAV v12.3.0 container/codec source were inspected; exact links and evidence are in `experiments/resource_preflight_20260907/experiment.md`.
+- Configuration/defaults: explicit `num_threads` or `LEROBOT_PYAV_THREADS` (default1, explicit0 requests automatic threads). This intentionally changes PyAV's unsafe automatic-thread default only; no unrelated thread pool is changed. Cleanup is always active, including with0 threads. `ZR0_GPU_GATE_{POLL_SECONDS,CONSECUTIVE_SAMPLES,TIMEOUT_SECONDS,MIN_FREE_MIB,MAX_USED_MIB,MAX_UTILIZATION,QUERY_TIMEOUT_SECONDS}` defaults to2/3/60/71680/1024/0/5. These are corrections to existing resource management, not new model/objective features; there is no switch bypassing ownership or safety checks.
+- Input/output/dataflow: path+timestamps -> owned lazy PyAV container/codec/generator -> existing nearest-frame selection -> unchanged RGB float tensor. Generator closes before codec/container, with nested finally blocks and public API capability checks; errors propagate. No active decoder cache or cross-worker sharing is introduced; existing bounded data caches persist. GPU checks resolve actual CUDA-visible UUID/PCI identities, poll compute processes/memory/utilization plus own child/group exit, log every observation and pin H10 launches to the verified UUID order. Unknown queries/identity/MIG/MPS configurations reject; timeout retains diagnostics. Thresholds allow an explicit idle memory baseline but never ignore a compute PID.
+- Compatibility: image resize, selected frames/timestamps, AR targets, actions/masks, losses, optimizer/scheduler, worker count, sampler algorithm/resume, checkpoint validation and Stage1 compatibility certificates are unchanged. H10 source identity now also records the decoder implementation. Source registry and historical artifacts are not rewritten. Historical formal runner branches are not invoked by this preflight; future training authorization remains three stages of100 successful updates only.
+- Verification: real AV1 delayed release reproduced (224 additional native threads per retained old decoder in this environment); historical full-DROID global_index2041670 located and included. Eight frame-tensor and four complete production-sample comparisons are exact. Four256-iteration fixed decoder scenarios hold threads/FDs constant after warmup, including injected failure after a real frame. Production4-worker DROID/RH20T two-epoch-prefix reading checks bounded resources and worker exit.59 initial targeted tests pass; broader regression and environment/artifact blockers are documented in the experiment record. Real occupied-GPU polling rejects, then later passes after release and three confirmations. Two actual four-GPU resource probes exit successfully and the gate waits for each owned child; zero training updates. Final H10/LIBERO tests cover UUID handoff. No formal training, automatic staging or commit.
+- Final verification: 82 targeted decoder/GPU/H10/LIBERO tests passed, along with Bash syntax and diff checks. The actual PyAV log reports requested_threads=1 and actual_thread_count=1. The existing full regression retains nine stale-audit failures caused by the separately edited registry; the driver-visible auxiliary tests pass their 30 cases but initialize CUDA, so their extra CPU-only assertion is recorded as failed.
+- Limits: delayed native resource release is proven, but historical MemoryError cannot be assigned a unique cause without historical resource telemetry. CPU stress is not full distributed training. GPU gate checks are not exclusive reservations. Complete three-stage100-update validation requires a concrete checkpoint/batch/head configuration plus valid data/checkpoint gates; its update counts remain 0/0/0. The two resource probes are complete and exited.
+
 ## Fifth auxiliary review: explicit Head removal and static objectives
 
 - Date: 2026-09-07. Purpose: permit Stage 2 to Stage 3 Head ablations and reject
@@ -668,3 +680,233 @@
 - 关闭功能后的行为：删除对应忽略规则后，未跟踪文件会重新出现在 Git 状态中。
 - 验证方式：`git check-ignore` 命中两条根目录规则，暂存区不存在因本次操作产生的目录删除，并核对磁盘文件数量不变。
 - 已知限制：`.gitignore` 不影响已经跟踪或已经暂存的文件；这些文件后续发生修改时仍会被 Git 报告。
+
+## RoboTwin evaluation metadata provenance audit
+
+- Date: 2026-09-07. Purpose: verify the supplied local `robotwin_unified`
+  metadata before using its normalization with the official ZR-0 checkpoint.
+- Source: read-only inspection of the existing v2 metadata loader,
+  `utils/dataset_spec.py`, `utils/normalization.py`, and the local v3 metadata;
+  official release sources and identities are recorded in
+  `docs/experiments/robotwin_metadata_20260907/experiment.md`.
+- Results: 27,500 episodes, 6,075,103 frames, three 480x640 RGB cameras and
+  14-dimensional state/action validated. Episode ranges, task references and
+  all eight data-file row counts are consistent. Source statistics contain
+  min/max/mean/std/count but no q01/q99 required by the quantile normalizer.
+- Official-source result: the checkpoint's matching metadata was not found in
+  the checked official GitHub tree/history or ModelScope release files.
+  Local recalculation cannot establish official-checkpoint equivalence.
+- Subsequent decision: the user explicitly accepted local recomputation for
+  diagnostic evaluation. The implementation below supersedes the original
+  blocked preparation status; official-checkpoint equivalence remains unverified.
+- Validation: structured JSON/Parquet reads, full metadata index/range checks,
+  source hashes and official file-list queries; no GPU, model load or rollout.
+
+## RoboTwin local diagnostic metadata export
+
+- Date: 2026-09-07. Purpose: make the supplied v3 dataset's metadata usable by
+  the existing v2 inference reader, after explicit acceptance of local statistics.
+- Files: `scripts/prepare_robotwin_eval_metadata.py`,
+  `tests/test_robotwin_eval_metadata.py`, `dataset2feature.yaml`,
+  `demo_data/README.md`, `demo_data/robotwin2.0-aloha-agilex/`, and the preceding
+  audit's experiment document and validation results.
+- Source: directly reuse
+  `lerobot/lerobot/common/datasets/utils.py::get_stats`; do not change the
+  calculation or normalization functions. The exporter adapts input reading
+  to selected Parquet columns and a separate metadata-only destination because
+  `calculate_global_stats` would overwrite the original dataset's statistics
+  and does not export the v3 episode/task tables to the v2 metadata interface.
+- Structure/data flow: validate original episode/task tables; read all frames
+  once into float32 state/action arrays; check dimensions, finite values and
+  frame/episode indices; compute exact full-array q01/q99 and the other original
+  statistics; compare source file hashes before/after; publish the four v2
+  metadata files and provenance atomically from a temporary directory.
+  No video decoding, trajectory conversion, dataset symlinks or source writes.
+- Inputs/outputs: source is the local `robotwin_unified` v3 directory. Output
+  is `demo_data/robotwin2.0-aloha-agilex`, with all 27,500 episode records,
+  23,559 instruction IDs, 6,075,103 contributing frames, original three camera
+  names and 14 motor dimensions. `metadata_only` and
+  `local_recomputed_checkpoint_unverified` markers preserve the export's purpose.
+  Source/output SHA256 values, helper identity and NumPy version are recorded.
+- Switches: the export script requires explicit source/output and
+  `--allow-unverified-stats` (default false); it refuses existing outputs or
+  outputs within the original dataset. The server uses the new metadata only
+  when `--dataset_entry demo_data.robotwin2.0-aloha-agilex` is selected.
+  The registry retains `use_quantile: true`; all other entries and defaults
+  remain unchanged. There is no new production model or loss feature.
+- Compatibility: reuse `LeRobotDatasetMetadata`, `resolve_dataset_spec`,
+  `prepare_action_expert_inputs_cpu`, `min_max_norm` and `denormalize_actions`.
+  Source camera size, actual model resize, action horizon/execution, padding and
+  normalization formulas are unchanged; only the explicitly selected entry's
+  metadata/statistics source is supplied. This is not a v2 training dataset.
+- Validation: seven focused tests cover uneven-file full-frame quantiles,
+  existing-reader loading, source preservation, output protection, explicit
+  choice, shape/NaN/index/count rejection. Full-data export succeeded and
+  checked all 12 original metadata/Parquet file hashes before and after.
+  Production metadata/input/denormalization checks are recorded in the experiment.
+- Limitations: statistics are not author-provided and are not proven equivalent
+  to the checkpoint's training statistics. No model weights, GPU context,
+  training or policy rollout are started by this task.
+
+## RoboTwin legacy checkpoint launch preparation
+
+- Date: 2026-09-07. Purpose: explicitly select the existing legacy compatibility
+  path for the downloaded official checkpoint and the accepted local metadata.
+- Files: `scripts/run_robotwin_legacy_server.sh`,
+  `tests/test_robotwin_legacy_server.py`, `tests/test_server_action_checkpoint.py`,
+  `tests/test_policy_manifest.py`, and
+  `docs/experiments/robotwin_legacy_checkpoint_20260907/{experiment.md,compatibility.json}`.
+- Source: directly reuse `server.py::deploy`,
+  `utils/cli_options.py::parse_server_options`, `ZR0Policy`, and
+  `utils/dataset_manifest.py::validate_policy_dataset_manifest`. The new shell
+  launcher only assembles the existing server command, sets package isolation
+  and the repository working directory, and prints or executes the command.
+  Existing launchers target training and do not provide this evaluation command.
+- Switches/defaults: default mode `print` does not import the model. Explicit
+  `serve` requires the caller's `CUDA_VISIBLE_DEVICES` and executes the original
+  server with `--allow_legacy_checkpoint_without_manifest`. Optional environment
+  overrides select Python/checkpoint/port; defaults are the existing ZR-0 Conda
+  Python, downloaded RoboTwin checkpoint and port 8022. The shared parser and
+  policy retain their strict false default. There is no training feature.
+- Inputs/outputs: the fixed dataset entry is the local diagnostic RoboTwin
+  metadata. The command fixes existing settings: direct action, window 1,
+  five denoising steps and padding 64. The checkpoint retains horizon 16;
+  Difference Query stays disabled through existing legacy resolution, with
+  no new attention backend selection. Print mode emits the shell command;
+  serve mode starts the original WebSocket server and preserves its behavior.
+- Compatibility: the missing-manifest option does not bypass an existing
+  manifest's integrity or semantic checks. The separate observation-contract
+  override is not enabled. No checkpoint files or training manifests are
+  fabricated, and no production Python/data/image/action logic is changed.
+  The launcher explicitly reports local statistics' unverified equivalence.
+- Verification: 20 focused tests, Bash syntax and command parsing passed.
+  Actual metadata plus checkpoint configuration passes the explicit legacy
+  path and fails the strict path. Existing header/shape validators confirm
+  149 Action Expert tensors, two VLM shards/625 indexed tensors, and disabled
+  Difference Query. Checkpoint file identities remain unchanged.
+- Limitations: only checkpoint/config/manifest structure is checked; GPU weight
+  loading, numeric forward execution, WebSocket integration and rollouts have
+  not run. Exact commands, stats SHA256 and results are in the experiment doc.
+
+## RoboTwin complete 50 x 2 x 20 evaluation preparation
+
+- Date: 2026-09-07. Purpose: prepare all 50 tasks in both Clean and Random
+  settings, with 20 policy rollouts per task/setting (2,000 total), as requested.
+- Files: `configs/robotwin_eval_50x2x20.json`,
+  `scripts/prepare_robotwin_eval_suite.py`, `tests/test_robotwin_eval_suite.py`,
+  `evaluation/RoboTwin/policy/ZR0/deploy_policy.yml`, and
+  `docs/experiments/robotwin_eval_50x2x20_20260907/experiment.md`.
+- Source: direct reuse of the original
+  `evaluation/RoboTwin/script/eval_policy_client.py::main/eval_policy`, the
+  ZR0 deployment template and `task_config/_eval_step_limit.yml`. No client,
+  simulator, policy, image or model code is changed. The original client accepts
+  one YAML per invocation and has no matrix scheduler; a small custom generator
+  supplies those YAMLs and a sequential command script using that same entry.
+- Structure/data flow: `build_plan` validates task/profile/count/horizon settings
+  and expands their Cartesian product; `prepare_suite` writes 100 generated
+  YAMLs, source hashes and Git provenance in `plan.json`, the requested config,
+  an experiment document and `run_all.sh` under an ignored output directory.
+  `render_runner` routes configs to the original client with per-group logs,
+  fail-fast execution and runtime status in the experiment document.
+- Switches/defaults: suite preparation requires an explicit script invocation
+  and output directory; it never launches evaluation. Running the generated
+  shell script is a separate explicit action requiring the RoboTwin Conda
+  environment and GPU selection. No automatic parallelism or resume is added.
+  Without invocation, existing single-task execution remains available.
+- Requested behavior changes: the single-task template now uses `n_episodes=20`
+  instead of 100 and a descriptive result label. The suite overrides template
+  task/scene/count from its central config and step limits from the official
+  50-task table (400 to 1700), instead of forcing every task to 400 steps.
+  A global step-limit override is rejected. Scene selection remains solely
+  `task_config`; `ckpt_setting` still does not load a model or select a scene.
+- Compatibility: keep seed 0, unseen instructions, expert solvability checking,
+  execution horizon 16, original videos, camera profiles and result locations.
+  Twenty means accepted policy trials, not twenty policy successes; expert
+  attempts are additional. The original strict model-manifest defaults remain.
+- Validation: focused matrix/count/step-limit and runner-routing tests, generated
+  YAML and Bash syntax checks; detailed results recorded in the experiment doc.
+- Limitations: local statistics are not proven equivalent to official training
+  statistics; this label is preserved in the suite and plan. GPU loading,
+  WebSocket integration, throughput and success rates were untested at the
+  preparation stage; subsequent launch validation is recorded below.
+
+## RoboTwin 50 x 2 x 20 evaluation launch
+
+- Date: 2026-09-07. Purpose: execute the prepared full matrix after explicit user
+  authorization. Reuse `scripts/run_robotwin_legacy_server.sh` and generated
+  `outputs/evaluations/robotwin_50x2x20_seed0/run_all.sh` without parameter changes.
+- Source/design: existing server and client execution only; tmux supplies
+  persistent process sessions and file redirection supplies runtime logs.
+  GPU 0 hosts the model and one serial simulation worker. The batch starts
+  after the existing `/healthz` endpoint confirms server readiness.
+- Switches/compatibility: explicit launch only; default preparation remains
+  inactive. No training, dataset, image, horizon, model or loss changes.
+  Local normalization statistics retain the existing unverified provenance.
+- Files: launch details and actual results in
+  `docs/experiments/robotwin_eval_50x2x20_20260907/experiment.md` and the output
+  directory's `experiment.md`; logs/videos are ignored runtime artifacts.
+- Validation: idle GPUs, available port, complete 100-group/2,000-trial matrix
+  and eight source hashes checked before launch. Runtime checks are recorded
+  in the experiment document as they complete.
+
+## RoboTwin missing render-check entry restoration
+
+- Date: 2026-09-07. Purpose: resolve the missing `test_render` import encountered
+  on the first authorized evaluation launch, before any rollout.
+- Files: `evaluation/RoboTwin/script/test_render.py` and the existing
+  `evaluation/RoboTwin/script/check_render.py` (now explicitly tracked), plus
+  the evaluation experiment document. The client itself is unchanged.
+- Source: direct reuse of this repository's `check_render.py::check_render`,
+  created during the earlier simulator installation and aligned with
+  `envs/_base_task.py::setup_scene`. The small compatibility entry restores
+  the `Sapien_TEST` function imported by the existing evaluation/collection
+  launchers; it does not duplicate rendering or task logic.
+- Inputs/outputs: no arguments; run the existing headless render/physics check
+  in a temporary directory and remove its diagnostic images afterward. Existing
+  validation failures propagate and still stop startup.
+- Switch/default: importing the entry is inactive; only explicit execution or
+  the original launcher's existing call runs the check. No evaluation/collection
+  switches, task seeds, rollouts, camera settings or model behavior change.
+- Validation: direct GPU render check and subsequent actual client startup;
+  outcomes recorded in the evaluation experiment document. The failed initial
+  launch produced no trials and its logs are retained before retry.
+- Runtime result: the render check passed; the complete batch restarted at
+  22:42:22 +08:00. At 22:45:04, repeated actual model forwards, 16x14 action
+  responses, updated robot observations, over 100 policy steps and video writes
+  were verified in the first Clean task. The batch remains asynchronous; this
+  startup verification is not a completed success-rate result.
+- By 22:48:07 the first policy trial completed 400 steps with failure (0/1,
+  seed 100001) and the second trial had started, verifying episode transition
+  and result counting. Full task/suite scores are still pending.
+
+## RoboTwin independent GPU evaluation workers
+
+- Date: 2026-09-07. Purpose: use all four GPUs for the authorized 50x2x20 matrix.
+- Files: `scripts/prepare_robotwin_eval_suite.py::assign_workers/prepare_suite`,
+  `scripts/run_robotwin_eval_worker.sh`, `utils/obs_buffer.py::ObservationBuffer`,
+  `evaluation/RoboTwin/script/check_render.py`, focused suite/worker tests and
+  `docs/experiments/robotwin_eval_50x2x20_20260907/experiment.md`.
+- Source: adapt the existing matrix generator and directly reuse its
+  `render_runner`, the legacy server launcher, health endpoint and original
+  evaluator. A small custom worker shell manages one server's lifetime and
+  starts one existing client batch after readiness. Existing launchers had
+  neither disjoint assignments nor per-worker model lifetime management.
+- Inputs/outputs: `--gpus 0 1 2 3` partitions 100 task/setting groups round-robin
+  into 25 per GPU. Ports increment from 8022; generated configs and a complete
+  plan connect each client to its assigned server. Each worker records logs,
+  an exit code and experiment runtime information in its own directory.
+- Switch/default: `--gpus` is absent by default, retaining serial behavior.
+  `ZR0_OBSERVATION_DEBUG_ROOT` is set per worker to isolate visualization JPEGs;
+  unset keeps the existing `temp` path. Observation values, tensors and model
+  inputs are unchanged. Renderer diagnostics only add device/PCI to output.
+- Explicit behavior changes: parallel scheduling uses independent seed-42
+  model RNG streams and appends `_p4` to result labels. Environment seed 0,
+  task/profile/count/limits, model, stats, image processing and action horizons
+  remain unchanged. Partial single-GPU trials are preserved but excluded from
+  the new run; it restarts the full matrix, with no episode resume assumption.
+- Verification: partition uniqueness/coverage, matching ports, unchanged client
+  semantics, serial fallback, worker startup/cleanup/failure routing, isolated
+  visualization values, Bash syntax, plus actual four-GPU runtime checks.
+- Limitations: no automatic retries/resume or guaranteed 4x wall-clock speedup.
+  Other workers continue after one worker fails. Statistics equivalence remains
+  unverified; actual startup/progress is recorded in the experiment document.

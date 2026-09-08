@@ -38,6 +38,13 @@ demo_data.libero_v21:
   dataset_type: vla
   sample_ratio: 1.0
   use_quantile: true
+# Diagnostic metadata only: local robotwin_unified quantiles, not author-provided stats.
+# Checkpoint equivalence is unverified; see the dataset's meta/provenance.json.
+demo_data.robotwin2.0-aloha-agilex:
+  dataset_path: demo_data/robotwin2.0-aloha-agilex
+  dataset_type: vla
+  sample_ratio: 1.0
+  use_quantile: true
 molmoact_tabletop_v3_stage05:
   dataset_path: /opt/data/private/lq/datasets/molmoact_dataset_tabletop-v3_stage05
   dataset_type: vla

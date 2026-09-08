@@ -16,6 +16,7 @@
 import importlib
 import json
 import logging
+import os
 import subprocess
 import warnings
 from collections import OrderedDict
@@ -28,6 +29,67 @@ import torch
 import torchvision
 from datasets.features.features import register_feature
 from PIL import Image
+
+
+def resolve_pyav_threads(num_threads: int | None = None) -> int:
+    """Limit only decoder threads; zero explicitly opts into FFmpeg auto threads."""
+    if num_threads is None:
+        num_threads = int(os.environ.get("LEROBOT_PYAV_THREADS", "1"))
+    if type(num_threads) is not int or num_threads < 0:
+        raise ValueError("PyAV num_threads / LEROBOT_PYAV_THREADS must be a non-negative integer")
+    return num_threads
+
+
+def decode_video_frames_pyav(video_path, timestamps, *, num_threads=None, log_loaded_timestamps=False):
+    """Own one lazy decoder per call, including partial iteration and failures."""
+    import av
+
+    threads = resolve_pyav_threads(num_threads)
+    first_ts, last_ts = min(timestamps), max(timestamps)
+    # Stream discovery can open a temporary codec too. Configure that codec as
+    # well as the independently allocated context used for actual decoding.
+    container = av.open(str(video_path), metadata_errors="ignore", options={"threads": str(threads)})
+    stream = codec = decoder = frame = None
+    loaded_frames, loaded_ts = [], []
+    try:
+        stream = container.streams.video[0]
+        codec = stream.codec_context
+        codec.thread_count = threads
+        offset = int(round(max(first_ts, 0) / stream.time_base))
+        container.seek(offset, backward=True, any_frame=False, stream=stream)
+        decoder = container.decode(video=0)
+        for frame in decoder:
+            current_ts = float(frame.pts * frame.time_base)
+            if not loaded_frames:
+                logging.getLogger(__name__).info(
+                    "PyAV decoder pid=%s codec=%s requested_threads=%s actual_thread_count=%s thread_type=%s",
+                    os.getpid(), codec.name, threads, codec.thread_count, codec.thread_type,
+                )
+            if log_loaded_timestamps:
+                logging.info(f"frame loaded at timestamp={current_ts:.4f}")
+            loaded_frames.append(torch.as_tensor(frame.to_rgb().to_ndarray()).permute(2, 0, 1))
+            loaded_ts.append(current_ts)
+            if current_ts >= last_ts:
+                break
+    finally:
+        # Stop demux/packet iteration before closing its codec and container.
+        # PyAV 12 exposes close(); newer versions may only expose container.close.
+        try:
+            if decoder is not None:
+                decoder.close()
+        finally:
+            decoder = frame = None
+            try:
+                close_codec = getattr(codec, "close", None)
+                if callable(close_codec) and codec.is_open:
+                    close_codec()
+            finally:
+                close_codec = codec = stream = None
+                try:
+                    container.close()
+                finally:
+                    container = None
+    return loaded_frames, loaded_ts
 
 
 def get_safe_default_codec():
@@ -45,6 +107,8 @@ def decode_video_frames(
     timestamps: list[float],
     tolerance_s: float,
     backend: str | None = None,
+    *,
+    num_threads: int | None = None,
 ) -> torch.Tensor:
     """
     Decodes video frames using the specified backend.
@@ -65,7 +129,7 @@ def decode_video_frames(
     if backend == "torchcodec":
         return decode_video_frames_torchcodec(video_path, timestamps, tolerance_s)
     elif backend in ["pyav", "video_reader"]:
-        return decode_video_frames_torchvision(video_path, timestamps, tolerance_s, backend)
+        return decode_video_frames_torchvision(video_path, timestamps, tolerance_s, backend, num_threads=num_threads)
     else:
         raise ValueError(f"Unsupported video backend: {backend}")
 
@@ -76,6 +140,8 @@ def decode_video_frames_torchvision(
     tolerance_s: float,
     backend: str = "pyav",
     log_loaded_timestamps: bool = False,
+    *,
+    num_threads: int | None = None,
 ) -> torch.Tensor:
     """Loads frames associated to the requested timestamps of a video
 
@@ -98,42 +164,26 @@ def decode_video_frames_torchvision(
     """
     video_path = str(video_path)
 
-    # set backend
-    keyframes_only = False
-    torchvision.set_video_backend(backend)
     if backend == "pyav":
-        keyframes_only = True  # pyav doesnt support accuracte seek
-
-    # set a video stream reader
-    # TODO(rcadene): also load audio stream at the same time
-    reader = torchvision.io.VideoReader(video_path, "video")
-
-    # set the first and last requested timestamps
-    # Note: previous timestamps are usually loaded, since we need to access the previous key frame
-    first_ts = min(timestamps)
-    last_ts = max(timestamps)
-
-    # access closest key frame of the first requested frame
-    # Note: closest key frame timestamp is usually smaller than `first_ts` (e.g. key frame can be the first frame of the video)
-    # for details on what `seek` is doing see: https://pyav.basswood-io.com/docs/stable/api/container.html?highlight=inputcontainer#av.container.InputContainer.seek
-    reader.seek(first_ts, keyframes_only=keyframes_only)
-
-    # load all frames until last requested frame
-    loaded_frames = []
-    loaded_ts = []
-    for frame in reader:
-        current_ts = frame["pts"]
-        if log_loaded_timestamps:
-            logging.info(f"frame loaded at timestamp={current_ts:.4f}")
-        loaded_frames.append(frame["data"])
-        loaded_ts.append(current_ts)
-        if current_ts >= last_ts:
-            break
-
-    if backend == "pyav":
-        reader.container.close()
-
-    reader = None
+        loaded_frames, loaded_ts = decode_video_frames_pyav(
+            video_path, timestamps, num_threads=num_threads, log_loaded_timestamps=log_loaded_timestamps,
+        )
+    else:
+        torchvision.set_video_backend(backend)
+        reader = torchvision.io.VideoReader(video_path, "video", num_threads=num_threads or 0)
+        try:
+            reader.seek(min(timestamps), keyframes_only=False)
+            loaded_frames, loaded_ts = [], []
+            for frame in reader:
+                current_ts = frame["pts"]
+                if log_loaded_timestamps:
+                    logging.info(f"frame loaded at timestamp={current_ts:.4f}")
+                loaded_frames.append(frame["data"])
+                loaded_ts.append(current_ts)
+                if current_ts >= max(timestamps):
+                    break
+        finally:
+            reader = None
 
     query_ts = torch.tensor(timestamps)
     loaded_ts = torch.tensor(loaded_ts)

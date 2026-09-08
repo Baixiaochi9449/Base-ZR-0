@@ -136,6 +136,8 @@ class PolicyManifestTest(unittest.TestCase):
         self._write_stats(2.0)
         with self.assertRaisesRegex(ValueError, "stats_sha256|state_q99|action_q"):
             self._construct()
+        with self.assertRaisesRegex(ValueError, "stats_sha256|state_q99|action_q"):
+            self._construct(allow_legacy_checkpoint_without_manifest=True)
 
     def test_mixed_manifest_selects_unique_entry_and_rejects_missing_or_ambiguous(self):
         future = self._manifest()

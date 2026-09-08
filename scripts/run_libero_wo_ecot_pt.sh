@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 export PYTHONNOUSERSITE=1
+export CUDA_VISIBLE_DEVICES="${ZR0_CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PYTHON_BIN=${ZR0_TRAIN_PYTHON:-/opt/data/private/lq/miniconda3/envs/ZR-0/bin/python}
@@ -325,7 +326,7 @@ write_experiment_record() {
             "$WANDB_PROJECT" "$WANDB_GROUP" "$RUN_NAME" "$WANDB_RUN_ID"
         printf -- '- W&B run URL：待 `wandb.init` 成功后补充。\n'
         printf -- '- 完整启动命令：\n\n```bash\n'
-        print_command env PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES=0,1,2,3 "${train_args[@]}"
+        print_command env PYTHONNOUSERSITE=1 "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES" "${train_args[@]}"
         printf '```\n'
     } >> "$EXPERIMENT_DOC"
 }
@@ -344,7 +345,7 @@ write_launch_manifest() {
 
 if [[ "${ZR0_DRY_RUN:-0}" == "1" ]]; then
     validate_explicit_batch_config
-    print_command env PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES=0,1,2,3 "${train_args[@]}"
+    print_command env PYTHONNOUSERSITE=1 "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES" "${train_args[@]}"
     exit 0
 fi
 
@@ -375,5 +376,5 @@ write_launch_manifest
 
 mkdir -p "$LOG_DIR" "$WANDB_LOCAL_DIR"
 
-print_command env PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES=0,1,2,3 "${train_args[@]}"
-exec env PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES=0,1,2,3 "${train_args[@]}"
+print_command env PYTHONNOUSERSITE=1 "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES" "${train_args[@]}"
+exec env PYTHONNOUSERSITE=1 "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES" "${train_args[@]}"

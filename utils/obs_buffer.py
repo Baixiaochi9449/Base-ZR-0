@@ -48,11 +48,12 @@ class ObservationBuffer:
 
         if visualize:
             timestamp = str(int(time.time()))
+            debug_root = os.environ.get("ZR0_OBSERVATION_DEBUG_ROOT", "temp")
             for camera_key in camera_keys:
-                os.makedirs(os.path.join('temp', timestamp, camera_key), exist_ok=True)
+                os.makedirs(os.path.join(debug_root, timestamp, camera_key), exist_ok=True)
                 for img_idx, torch_image in enumerate(agg_observations[camera_key]):
                     to_pil = ToPILImage()
                     pil_image = to_pil(torch_image)
-                    pil_image.save(os.path.join("temp", timestamp, camera_key, f"{img_idx}.jpg"))
+                    pil_image.save(os.path.join(debug_root, timestamp, camera_key, f"{img_idx}.jpg"))
 
         return agg_observations
