@@ -1,0 +1,2586 @@
+{
+  "date": "2026-09-08",
+  "timezone": "Asia/Shanghai",
+  "baseline_commit": "3bad66373877bcdfa9c1f86e134816fc8a426207",
+  "scope": "Read-only release audit, numeric full scan only for RH20T; no training or evaluation launched",
+  "versions": {
+    "numpy": "2.2.6",
+    "pyarrow": "25.0.1",
+    "av": "12.3.0",
+    "Pillow": "12.3.0",
+    "h5py": "3.16.0"
+  },
+  "datasets": [
+    {
+      "root": "/opt/data/private/lq/datasets/droid_1.0.1_stage05_full_95658_20260831",
+      "created_at": "2026-09-08T14:18:08.359254+08:00",
+      "info": {
+        "chunks_size": 1000,
+        "codebase_version": "v3.0",
+        "data_files_size_in_mb": 100,
+        "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+        "fps": 15,
+        "robot_type": "Franka",
+        "splits": {
+          "train": "0:95658"
+        },
+        "total_episodes": 95658,
+        "total_frames": 27630375,
+        "total_tasks": 49630,
+        "video_files_size_in_mb": 500,
+        "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
+      },
+      "errors": [],
+      "metadata_sha256": {
+        "meta/info.json": "3113ab6759d8913256235c8ee1b867652fd58da4098110c38637dff33b3c604e",
+        "meta/stage05_merge.json": "70c5d8b8e164a0cf646cc463497a9f40b3839477a75d8ec87ecc0fc72ebc57a6",
+        "meta/stats.json": "f973ce215c5bfcc9d83608986b787bed0137861468481275d287e8130f87b7f8"
+      },
+      "merge": {
+        "annotation_storage": "canonical_json_utf8_v1",
+        "expected_dataset_id": "droid",
+        "format": "stage05_keyframe_history_v1",
+        "log_dir": "/opt/data/private/lq/datasets/stage05_merge_logs/droid_full_95658_20260831",
+        "missing_stage05_policy": "null",
+        "modality_metadata": {
+          "identity_sha256": "none",
+          "mode": "absent",
+          "protocol": "none"
+        },
+        "pre_first_keyframe_policy": "error",
+        "selection_identity_sha256": "96042d24c0632081858ac0c290c263ae02bd46de7ac6aba3bf358cdbcc39572d",
+        "source_dataset": "/opt/data/private/lq/datasets/droid_1.0.1",
+        "source_identity_sha256": "9aa53e3ca4d52e6139192134e34fd4d60ac1500acda625099ddae19d5f75b4a1",
+        "stage05_dir": "/opt/data/private/lq/datasets/Annotation_datasets/droid_1.0.1/future_diff_v12_full_gpu0123_20260807/05_merge_current_status_29432_20260831/droid",
+        "status": "configured"
+      },
+      "episodes": {
+        "count": 95658,
+        "sum_length": 27630375,
+        "length_quantiles_0_50_90_99_100": [
+          1,
+          221.5,
+          547,
+          1195,
+          3191
+        ],
+        "shorter_than_10": 280,
+        "shorter_than_32": 926
+      },
+      "missing_data_references": [],
+      "mapping": {
+        "count": 95658,
+        "unique_old": 95658,
+        "new_contiguous": true
+      },
+      "tasks": {
+        "count": 49630,
+        "text_column": "__index_level_0__",
+        "empty_text": 1,
+        "duplicate_indices": 0,
+        "examples": [
+          {
+            "task_index": 0,
+            "__index_level_0__": ""
+          },
+          {
+            "task_index": 1,
+            "__index_level_0__": "Put the blue block in the green bowl"
+          },
+          {
+            "task_index": 2,
+            "__index_level_0__": "Move the bottom right tip of the duvet to the left"
+          }
+        ],
+        "top5_episode_task_membership_frames": [
+          [
+            "",
+            7807335
+          ],
+          [
+            "No action",
+            51689
+          ],
+          [
+            "Put the marker in the cup",
+            49737
+          ],
+          [
+            "Put the marker in the mug",
+            44454
+          ],
+          [
+            "Put the lid on the pot",
+            41602
+          ]
+        ]
+      },
+      "parquet": {
+        "files": 86,
+        "rows": 27630375,
+        "row_groups": 433,
+        "bytes": 9079873181,
+        "nulls": {
+          "train_data": 18122852,
+          "slot_data": 18122852
+        },
+        "null_count_unknown_rows": {}
+      },
+      "counts_match": true,
+      "stats_nonfinite_paths": [],
+      "sampled_rows": [
+        {
+          "file": "data/chunk-000/file-000.parquet",
+          "row_group": 2,
+          "rows": 256,
+          "counts": {
+            "train_data_null": 256,
+            "slot_data_null": 256
+          }
+        },
+        {
+          "file": "data/chunk-000/file-021.parquet",
+          "row_group": 2,
+          "rows": 256,
+          "counts": {
+            "train_data_valid_shape": 55,
+            "slot_data_valid_shape": 55,
+            "train_data_null": 201,
+            "slot_data_null": 201
+          }
+        },
+        {
+          "file": "data/chunk-000/file-042.parquet",
+          "row_group": 2,
+          "rows": 256,
+          "counts": {
+            "train_data_null": 256,
+            "slot_data_null": 256
+          }
+        },
+        {
+          "file": "data/chunk-000/file-063.parquet",
+          "row_group": 2,
+          "rows": 256,
+          "counts": {
+            "train_data_null": 256,
+            "slot_data_null": 256
+          }
+        },
+        {
+          "file": "data/chunk-000/file-085.parquet",
+          "row_group": 2,
+          "rows": 256,
+          "counts": {
+            "train_data_null": 256,
+            "slot_data_null": 256
+          }
+        }
+      ],
+      "images": [
+        {
+          "camera": "observation.images.exterior_1_left",
+          "files": 302,
+          "bytes": 147715463359,
+          "headers": {
+            "320x180:libdav1d:15": 302
+          },
+          "header_errors": [],
+          "decoded": [
+            {
+              "file": "videos/observation.images.exterior_1_left/chunk-000/file-000.mp4",
+              "shape": [
+                180,
+                320,
+                3
+              ],
+              "min": 0,
+              "max": 255,
+              "std": 65.05054415473325
+            },
+            {
+              "file": "videos/observation.images.exterior_1_left/chunk-000/file-150.mp4",
+              "shape": [
+                180,
+                320,
+                3
+              ],
+              "min": 0,
+              "max": 255,
+              "std": 70.4171767382359
+            },
+            {
+              "file": "videos/observation.images.exterior_1_left/chunk-000/file-301.mp4",
+              "shape": [
+                180,
+                320,
+                3
+              ],
+              "min": 0,
+              "max": 255,
+              "std": 70.639731523729
+            }
+          ]
+        },
+        {
+          "camera": "observation.images.exterior_2_left",
+          "files": 299,
+          "bytes": 146492395651,
+          "headers": {
+            "320x180:libdav1d:15": 299
+          },
+          "header_errors": [],
+          "decoded": [
+            {
+              "file": "videos/observation.images.exterior_2_left/chunk-000/file-000.mp4",
+              "shape": [
+                180,
+                320,
+                3
+              ],
+              "min": 0,
+              "max": 255,
+              "std": 70.69904368766184
+            },
+            {
+              "file": "videos/observation.images.exterior_2_left/chunk-000/file-149.mp4",
+              "shape": [
+                180,
+                320,
+                3
+              ],
+              "min": 0,
+              "max": 255,
+              "std": 61.730086120220065
+            },
+            {
+              "file": "videos/observation.images.exterior_2_left/chunk-000/file-298.mp4",
+              "shape": [
+                180,
+                320,
+                3
+              ],
+              "min": 0,
+              "max": 255,
+              "std": 68.52895492824626
+            }
+          ]
+        },
+        {
+          "camera": "observation.images.wrist_left",
+          "files": 183,
+          "bytes": 91900371407,
+          "headers": {
+            "320x180:libdav1d:15": 183
+          },
+          "header_errors": [],
+          "decoded": [
+            {
+              "file": "videos/observation.images.wrist_left/chunk-000/file-000.mp4",
+              "shape": [
+                180,
+                320,
+                3
+              ],
+              "min": 0,
+              "max": 255,
+              "std": 72.27187043457866
+            },
+            {
+              "file": "videos/observation.images.wrist_left/chunk-000/file-091.mp4",
+              "shape": [
+                180,
+                320,
+                3
+              ],
+              "min": 0,
+              "max": 255,
+              "std": 67.74136551856138
+            },
+            {
+              "file": "videos/observation.images.wrist_left/chunk-000/file-182.mp4",
+              "shape": [
+                180,
+                320,
+                3
+              ],
+              "min": 0,
+              "max": 255,
+              "std": 72.43947873863308
+            }
+          ]
+        }
+      ],
+      "missing_video_references": []
+    },
+    {
+      "root": "/opt/data/private/lq/datasets/molmoact_dataset_household-v3_stage05",
+      "created_at": "2026-09-08T14:20:25.193219+08:00",
+      "info": {
+        "chunks_size": 1000,
+        "codebase_version": "v3.0",
+        "data_files_size_in_mb": 100,
+        "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+        "fps": 10,
+        "robot_type": "franka",
+        "splits": {
+          "train": "0:5936"
+        },
+        "total_episodes": 5936,
+        "total_frames": 794199,
+        "total_tasks": 82,
+        "video_files_size_in_mb": 200,
+        "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
+      },
+      "errors": [],
+      "metadata_sha256": {
+        "meta/info.json": "18df0953fcfde610c53ef8f4af971327698ed88e02033c3ebc4f7edf18b6e41b",
+        "meta/modality.json": "d7ffb2f81d37a2cde6603ca2da349ca72f8b337307c124c51adc7eb06a606b6e",
+        "meta/stage05_merge.json": "7674079a6936a43b7acfc018e85b6fd3119ac8592c4bd9d3d2690f0352eea7f8",
+        "meta/stats.json": "9bdb522d0ebe10722a3d0a4691b00273c08756bf2f81997bd78249e3ce3b9c7a",
+        "meta/stats_gr00t.json": "ef6087c75429ea846e69630d115a216caa6bc9623b51dce1c560ded6d6d15c1b"
+      },
+      "merge": {
+        "annotation_storage": "canonical_json_utf8_v1",
+        "expected_dataset_id": "molmoact_household",
+        "format": "stage05_keyframe_history_v1",
+        "log_dir": "/opt/data/private/lq/datasets/stage05_merge_logs/household",
+        "missing_stage05_policy": "exclude",
+        "modality_metadata": {
+          "identity_sha256": "fd0873d799c9eb06b277e82a970866c290ace15cf322ce988ee39eec2ef5e2a9",
+          "mode": "generated",
+          "protocol": "molmoact_native_modality_v1"
+        },
+        "pre_first_keyframe_policy": "error",
+        "selection_identity_sha256": "f4692ba52f153773f196b89b8463b1d91903f6315648a6c86ad0c7fd490fb6f2",
+        "source_dataset": "/opt/data/private/lq/datasets/molmoact_dataset_household-v3",
+        "source_identity_sha256": "f652b4265db114822dfc16eb38899b2a6ea549a75690846319b8c4be53875784",
+        "stage05_dir": "/opt/data/private/lq/datasets/Annotation_datasets/molmoact_dataset_household-v3/future_diff_v12_full_gpu0123_20260808/05_merge/molmoact_household",
+        "status": "configured"
+      },
+      "episodes": {
+        "count": 5936,
+        "sum_length": 794199,
+        "length_quantiles_0_50_90_99_100": [
+          34,
+          115,
+          229,
+          308,
+          393
+        ],
+        "shorter_than_10": 0,
+        "shorter_than_32": 0
+      },
+      "missing_data_references": [],
+      "mapping": {
+        "count": 5936,
+        "unique_old": 5936,
+        "new_contiguous": true
+      },
+      "tasks": {
+        "count": 82,
+        "text_column": "task",
+        "empty_text": 0,
+        "duplicate_indices": 0,
+        "examples": [
+          {
+            "task_index": 0,
+            "task": "lift the pillow"
+          },
+          {
+            "task_index": 1,
+            "task": "stand the pillow up"
+          },
+          {
+            "task_index": 2,
+            "task": "move the pillow to side"
+          }
+        ],
+        "top5_episode_task_membership_frames": [
+          [
+            "pour me some water",
+            72873
+          ],
+          [
+            "put the plate in the dishwasher",
+            33722
+          ],
+          [
+            "organize the shelf",
+            30154
+          ],
+          [
+            "throw the tissue in the trash bin",
+            28969
+          ],
+          [
+            "put my clothes in the laundry bag",
+            27943
+          ]
+        ]
+      },
+      "parquet": {
+        "files": 5489,
+        "rows": 794199,
+        "row_groups": 5489,
+        "bytes": 560054518945,
+        "nulls": {
+          "train_data": 0,
+          "slot_data": 0
+        },
+        "null_count_unknown_rows": {}
+      },
+      "counts_match": true,
+      "stats_nonfinite_paths": [],
+      "sampled_rows": [
+        {
+          "file": "data/chunk-000/file-000.parquet",
+          "row_group": 0,
+          "rows": 167,
+          "counts": {
+            "train_data_valid_shape": 167,
+            "slot_data_valid_shape": 167
+          }
+        },
+        {
+          "file": "data/chunk-001/file-372.parquet",
+          "row_group": 0,
+          "rows": 217,
+          "counts": {
+            "train_data_valid_shape": 217,
+            "slot_data_valid_shape": 217
+          }
+        },
+        {
+          "file": "data/chunk-002/file-744.parquet",
+          "row_group": 0,
+          "rows": 116,
+          "counts": {
+            "train_data_valid_shape": 116,
+            "slot_data_valid_shape": 116
+          }
+        },
+        {
+          "file": "data/chunk-004/file-116.parquet",
+          "row_group": 0,
+          "rows": 84,
+          "counts": {
+            "train_data_valid_shape": 84,
+            "slot_data_valid_shape": 84
+          }
+        },
+        {
+          "file": "data/chunk-005/file-488.parquet",
+          "row_group": 0,
+          "rows": 137,
+          "counts": {
+            "train_data_valid_shape": 137,
+            "slot_data_valid_shape": 137
+          }
+        }
+      ],
+      "images": [
+        {
+          "camera": "first_view",
+          "embedded": true,
+          "decoded": [
+            {
+              "file": "data/chunk-000/file-000.parquet",
+              "format": "PNG",
+              "size_wh": [
+                640,
+                480
+              ],
+              "min": 7,
+              "max": 255,
+              "std": 56.261522155863496
+            },
+            {
+              "file": "data/chunk-002/file-744.parquet",
+              "format": "PNG",
+              "size_wh": [
+                640,
+                480
+              ],
+              "min": 26,
+              "max": 255,
+              "std": 49.324456292198605
+            },
+            {
+              "file": "data/chunk-005/file-488.parquet",
+              "format": "PNG",
+              "size_wh": [
+                640,
+                480
+              ],
+              "min": 45,
+              "max": 255,
+              "std": 46.47456200405996
+            }
+          ]
+        },
+        {
+          "camera": "second_view",
+          "embedded": true,
+          "decoded": [
+            {
+              "file": "data/chunk-000/file-000.parquet",
+              "format": "PNG",
+              "size_wh": [
+                640,
+                480
+              ],
+              "min": 1,
+              "max": 255,
+              "std": 63.99976805553085
+            },
+            {
+              "file": "data/chunk-002/file-744.parquet",
+              "format": "PNG",
+              "size_wh": [
+                640,
+                480
+              ],
+              "min": 36,
+              "max": 255,
+              "std": 42.37077820295128
+            },
+            {
+              "file": "data/chunk-005/file-488.parquet",
+              "format": "PNG",
+              "size_wh": [
+                640,
+                480
+              ],
+              "min": 21,
+              "max": 255,
+              "std": 56.86505471864882
+            }
+          ]
+        },
+        {
+          "camera": "wrist_image",
+          "embedded": true,
+          "decoded": [
+            {
+              "file": "data/chunk-000/file-000.parquet",
+              "format": "PNG",
+              "size_wh": [
+                640,
+                480
+              ],
+              "min": 73,
+              "max": 255,
+              "std": 64.07341595228615
+            },
+            {
+              "file": "data/chunk-002/file-744.parquet",
+              "format": "PNG",
+              "size_wh": [
+                640,
+                480
+              ],
+              "min": 61,
+              "max": 255,
+              "std": 44.84495459662449
+            },
+            {
+              "file": "data/chunk-005/file-488.parquet",
+              "format": "PNG",
+              "size_wh": [
+                640,
+                480
+              ],
+              "min": 72,
+              "max": 255,
+              "std": 48.10656943670997
+            }
+          ]
+        }
+      ],
+      "missing_video_references": []
+    },
+    {
+      "root": "/opt/data/private/lq/datasets/molmoact_dataset_tabletop-v3_stage05",
+      "created_at": "2026-09-08T14:23:40.459016+08:00",
+      "info": {
+        "chunks_size": 1000,
+        "codebase_version": "v3.0",
+        "data_files_size_in_mb": 100,
+        "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+        "fps": 10,
+        "robot_type": "franka",
+        "splits": {
+          "train": "0:1881"
+        },
+        "total_episodes": 1881,
+        "total_frames": 310743,
+        "total_tasks": 14,
+        "video_files_size_in_mb": 200,
+        "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
+      },
+      "errors": [],
+      "metadata_sha256": {
+        "meta/info.json": "d9524997dedf1d671ff84e1379b0629994f945a2d54e2bf1a9fbb7875fefc734",
+        "meta/modality.json": "d7ffb2f81d37a2cde6603ca2da349ca72f8b337307c124c51adc7eb06a606b6e",
+        "meta/stage05_merge.json": "1156836c2d8e12ad872810f8fbdaa223ae59b44f005056db850a5d2eabc12a01",
+        "meta/stats.json": "1c5bacd8b7d23c33f63e86dc6059d65227e7ce1157065c991b4a8d9b92bd9c4a",
+        "meta/stats_gr00t.json": "25b5b3525114b9ea2665389d1748fc81c21e3282a407e890d59db618941d2228"
+      },
+      "merge": {
+        "annotation_storage": "canonical_json_utf8_v1",
+        "expected_dataset_id": "molmoact_tabletop",
+        "format": "stage05_keyframe_history_v1",
+        "log_dir": "/opt/data/private/lq/datasets/stage05_merge_logs/tabletop",
+        "missing_stage05_policy": "exclude",
+        "modality_metadata": {
+          "identity_sha256": "fd0873d799c9eb06b277e82a970866c290ace15cf322ce988ee39eec2ef5e2a9",
+          "mode": "generated",
+          "protocol": "molmoact_native_modality_v1"
+        },
+        "pre_first_keyframe_policy": "error",
+        "selection_identity_sha256": "0eef78b4d73b544e001f7d803441b6c02dcc784879b1c3491b62e570c4d983cb",
+        "source_dataset": "/opt/data/private/lq/datasets/molmoact_dataset_tabletop-v3",
+        "source_identity_sha256": "7b4327ed83ecc9b5f85653f3af9de88e58605cf1c570a0ec431933f0d19e9324",
+        "stage05_dir": "/opt/data/private/lq/datasets/Annotation_datasets/molmoact_dataset_tabletop-v3/future_diff_v12_full_gpu23_20260807/05_merge/molmoact_tabletop",
+        "status": "configured"
+      },
+      "episodes": {
+        "count": 1881,
+        "sum_length": 310743,
+        "length_quantiles_0_50_90_99_100": [
+          37,
+          160,
+          290,
+          423.0000000000002,
+          562
+        ],
+        "shorter_than_10": 0,
+        "shorter_than_32": 0
+      },
+      "missing_data_references": [],
+      "mapping": {
+        "count": 1881,
+        "unique_old": 1881,
+        "new_contiguous": true
+      },
+      "tasks": {
+        "count": 14,
+        "text_column": "task",
+        "empty_text": 0,
+        "duplicate_indices": 0,
+        "examples": [
+          {
+            "task_index": 0,
+            "task": "close the box"
+          },
+          {
+            "task_index": 1,
+            "task": "close the laptop"
+          },
+          {
+            "task_index": 2,
+            "task": "close the top drawer"
+          }
+        ],
+        "top5_episode_task_membership_frames": [
+          [
+            "load the plate",
+            48064
+          ],
+          [
+            "load the bowl",
+            36598
+          ],
+          [
+            "hang the mug",
+            34504
+          ],
+          [
+            "flip the mug upright",
+            29871
+          ],
+          [
+            "fold the shorts",
+            28427
+          ]
+        ]
+      },
+      "parquet": {
+        "files": 1613,
+        "rows": 310743,
+        "row_groups": 1613,
+        "bytes": 168829089773,
+        "nulls": {
+          "train_data": 0,
+          "slot_data": 0
+        },
+        "null_count_unknown_rows": {}
+      },
+      "counts_match": true,
+      "stats_nonfinite_paths": [],
+      "sampled_rows": [
+        {
+          "file": "data/chunk-000/file-000.parquet",
+          "row_group": 0,
+          "rows": 156,
+          "counts": {
+            "train_data_valid_shape": 156,
+            "slot_data_valid_shape": 156
+          }
+        },
+        {
+          "file": "data/chunk-000/file-403.parquet",
+          "row_group": 0,
+          "rows": 200,
+          "counts": {
+            "train_data_valid_shape": 200,
+            "slot_data_valid_shape": 200
+          }
+        },
+        {
+          "file": "data/chunk-000/file-806.parquet",
+          "row_group": 0,
+          "rows": 256,
+          "counts": {
+            "train_data_valid_shape": 256,
+            "slot_data_valid_shape": 256
+          }
+        },
+        {
+          "file": "data/chunk-001/file-243.parquet",
+          "row_group": 0,
+          "rows": 256,
+          "counts": {
+            "train_data_valid_shape": 256,
+            "slot_data_valid_shape": 256
+          }
+        },
+        {
+          "file": "data/chunk-001/file-646.parquet",
+          "row_group": 0,
+          "rows": 199,
+          "counts": {
+            "train_data_valid_shape": 199,
+            "slot_data_valid_shape": 199
+          }
+        }
+      ],
+      "images": [
+        {
+          "camera": "first_view",
+          "embedded": true,
+          "decoded": [
+            {
+              "file": "data/chunk-000/file-000.parquet",
+              "format": "PNG",
+              "size_wh": [
+                640,
+                480
+              ],
+              "min": 21,
+              "max": 255,
+              "std": 37.36896750074263
+            },
+            {
+              "file": "data/chunk-000/file-806.parquet",
+              "format": "PNG",
+              "size_wh": [
+                640,
+                480
+              ],
+              "min": 35,
+              "max": 255,
+              "std": 35.06476367630786
+            },
+            {
+              "file": "data/chunk-001/file-646.parquet",
+              "format": "PNG",
+              "size_wh": [
+                640,
+                480
+              ],
+              "min": 10,
+              "max": 255,
+              "std": 28.62291452882647
+            }
+          ]
+        },
+        {
+          "camera": "second_view",
+          "embedded": true,
+          "decoded": [
+            {
+              "file": "data/chunk-000/file-000.parquet",
+              "format": "PNG",
+              "size_wh": [
+                640,
+                480
+              ],
+              "min": 45,
+              "max": 255,
+              "std": 31.92840477946326
+            },
+            {
+              "file": "data/chunk-000/file-806.parquet",
+              "format": "PNG",
+              "size_wh": [
+                640,
+                480
+              ],
+              "min": 28,
+              "max": 255,
+              "std": 36.076584471876494
+            },
+            {
+              "file": "data/chunk-001/file-646.parquet",
+              "format": "PNG",
+              "size_wh": [
+                640,
+                480
+              ],
+              "min": 36,
+              "max": 255,
+              "std": 42.90766541847123
+            }
+          ]
+        },
+        {
+          "camera": "wrist_image",
+          "embedded": true,
+          "decoded": [
+            {
+              "file": "data/chunk-000/file-000.parquet",
+              "format": "PNG",
+              "size_wh": [
+                640,
+                480
+              ],
+              "min": 66,
+              "max": 237,
+              "std": 23.127102600231325
+            },
+            {
+              "file": "data/chunk-000/file-806.parquet",
+              "format": "PNG",
+              "size_wh": [
+                640,
+                480
+              ],
+              "min": 73,
+              "max": 175,
+              "std": 14.394059161548503
+            },
+            {
+              "file": "data/chunk-001/file-646.parquet",
+              "format": "PNG",
+              "size_wh": [
+                640,
+                480
+              ],
+              "min": 68,
+              "max": 235,
+              "std": 20.265414982476937
+            }
+          ]
+        }
+      ],
+      "missing_video_references": []
+    },
+    {
+      "root": "/opt/data/private/lq/datasets/RH20T-v30_stage05",
+      "created_at": "2026-09-08T14:24:49.349272+08:00",
+      "info": {
+        "chunks_size": 1000,
+        "codebase_version": "v3.0",
+        "data_files_size_in_mb": 100,
+        "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+        "fps": 10,
+        "robot_type": "rh20t_multi_robot",
+        "splits": {
+          "train": "0:8142"
+        },
+        "total_episodes": 8142,
+        "total_frames": 3898056,
+        "total_tasks": 141,
+        "video_files_size_in_mb": 500,
+        "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
+      },
+      "errors": [],
+      "metadata_sha256": {
+        "meta/info.json": "56112273c30ea44826f6934e895342cf4ef6ef7cba62865a8be59fa837d66ea2",
+        "meta/rh20t_conversion.json": "f8dbe65ce8d6b61e9d4dcb47340659bf1e47a7fa07c16ee3b2fdd948e40e8c37",
+        "meta/stage05_merge.json": "c7ac5fa2005fdf25e944a220797a1d340a326411c750e4411b656c4304450b26",
+        "meta/stats.json": "b194559a579be67995ee54eecd69068d5dabde456f85ae92243f1f106218c2a4"
+      },
+      "merge": {
+        "annotation_storage": "canonical_json_utf8_v1",
+        "expected_dataset_id": "rh20t",
+        "format": "stage05_keyframe_history_v1",
+        "log_dir": "/opt/data/private/lq/datasets/stage05_merge_logs/RH20T-v30_stage05",
+        "missing_stage05_policy": "exclude",
+        "modality_metadata": {
+          "identity_sha256": "none",
+          "mode": "absent",
+          "protocol": "none"
+        },
+        "pre_first_keyframe_policy": "error",
+        "selection_identity_sha256": "f33023bbc7d549cbbaf0951f83617e89c061ac1a28c6e43b1cf82e0e53c000b4",
+        "source_dataset": "/opt/data/private/lq/datasets/RH20T-v30",
+        "source_identity_sha256": "93489598cae46c3b238c9b0f021f332e139dba995ac053c26f9fb9b6651e4fa8",
+        "stage05_dir": "/opt/data/private/lq/datasets/Annotation_datasets/RH20T-v30/future_diff_v12_full_cpu_20260815/05_merge/rh20t",
+        "status": "configured"
+      },
+      "episodes": {
+        "count": 8142,
+        "sum_length": 3898056,
+        "length_quantiles_0_50_90_99_100": [
+          18,
+          388,
+          836,
+          1767.5900000000001,
+          6247
+        ],
+        "shorter_than_10": 0,
+        "shorter_than_32": 2
+      },
+      "missing_data_references": [],
+      "mapping": {
+        "count": 8142,
+        "unique_old": 8142,
+        "new_contiguous": true
+      },
+      "tasks": {
+        "count": 141,
+        "text_column": "task",
+        "empty_text": 0,
+        "duplicate_indices": 0,
+        "examples": [
+          {
+            "task_index": 0,
+            "task": "Press the button from top to bottom"
+          },
+          {
+            "task_index": 1,
+            "task": "Pull out a napkin"
+          },
+          {
+            "task_index": 2,
+            "task": "Press three buttons from left to right in sequence"
+          }
+        ],
+        "top5_episode_task_membership_frames": [
+          [
+            "Screw the lid onto the jar",
+            76200
+          ],
+          [
+            "Press three buttons from left to right in sequence",
+            70573
+          ],
+          [
+            "Hold a small block with the gripper and sweep it from left to right on the table",
+            68050
+          ],
+          [
+            "Push the soccer ball into the goal",
+            62624
+          ],
+          [
+            "Pull out a napkin",
+            59149
+          ]
+        ]
+      },
+      "parquet": {
+        "files": 25,
+        "rows": 3898056,
+        "row_groups": 93,
+        "bytes": 1529149163,
+        "nulls": {
+          "train_data": 0,
+          "slot_data": 0
+        },
+        "null_count_unknown_rows": {}
+      },
+      "counts_match": true,
+      "stats_nonfinite_paths": [
+        "/action/std/0",
+        "/observation.state/std/0",
+        "/observation.tcp_pose/std/0"
+      ],
+      "sampled_rows": [
+        {
+          "file": "data/chunk-000/file-000.parquet",
+          "row_group": 2,
+          "rows": 256,
+          "counts": {
+            "train_data_valid_shape": 256,
+            "slot_data_valid_shape": 256
+          }
+        },
+        {
+          "file": "data/chunk-000/file-006.parquet",
+          "row_group": 2,
+          "rows": 256,
+          "counts": {
+            "train_data_valid_shape": 256,
+            "slot_data_valid_shape": 256
+          }
+        },
+        {
+          "file": "data/chunk-000/file-012.parquet",
+          "row_group": 2,
+          "rows": 256,
+          "counts": {
+            "train_data_valid_shape": 256,
+            "slot_data_valid_shape": 256
+          }
+        },
+        {
+          "file": "data/chunk-000/file-018.parquet",
+          "row_group": 2,
+          "rows": 256,
+          "counts": {
+            "train_data_valid_shape": 256,
+            "slot_data_valid_shape": 256
+          }
+        },
+        {
+          "file": "data/chunk-000/file-024.parquet",
+          "row_group": 1,
+          "rows": 256,
+          "counts": {
+            "train_data_valid_shape": 256,
+            "slot_data_valid_shape": 256
+          }
+        }
+      ],
+      "images": [
+        {
+          "camera": "observation.images.exterior_1_left",
+          "files": 100,
+          "bytes": 50411940311,
+          "headers": {
+            "320x180:h264:10": 100
+          },
+          "header_errors": [],
+          "decoded": [
+            {
+              "file": "videos/observation.images.exterior_1_left/chunk-000/file-000.mp4",
+              "shape": [
+                180,
+                320,
+                3
+              ],
+              "min": 0,
+              "max": 255,
+              "std": 52.996666527561516
+            },
+            {
+              "file": "videos/observation.images.exterior_1_left/chunk-000/file-049.mp4",
+              "shape": [
+                180,
+                320,
+                3
+              ],
+              "min": 0,
+              "max": 255,
+              "std": 65.36930539487633
+            },
+            {
+              "file": "videos/observation.images.exterior_1_left/chunk-000/file-099.mp4",
+              "shape": [
+                180,
+                320,
+                3
+              ],
+              "min": 0,
+              "max": 255,
+              "std": 68.57155549762174
+            }
+          ]
+        },
+        {
+          "camera": "observation.images.exterior_2_left",
+          "files": 97,
+          "bytes": 48602250588,
+          "headers": {
+            "320x180:h264:10": 97
+          },
+          "header_errors": [],
+          "decoded": [
+            {
+              "file": "videos/observation.images.exterior_2_left/chunk-000/file-000.mp4",
+              "shape": [
+                180,
+                320,
+                3
+              ],
+              "min": 0,
+              "max": 255,
+              "std": 59.865267967967355
+            },
+            {
+              "file": "videos/observation.images.exterior_2_left/chunk-000/file-048.mp4",
+              "shape": [
+                180,
+                320,
+                3
+              ],
+              "min": 0,
+              "max": 255,
+              "std": 62.29403388808495
+            },
+            {
+              "file": "videos/observation.images.exterior_2_left/chunk-000/file-096.mp4",
+              "shape": [
+                180,
+                320,
+                3
+              ],
+              "min": 0,
+              "max": 255,
+              "std": 57.418099843461114
+            }
+          ]
+        },
+        {
+          "camera": "observation.images.wrist_left",
+          "files": 72,
+          "bytes": 36098045195,
+          "headers": {
+            "320x180:h264:10": 72
+          },
+          "header_errors": [],
+          "decoded": [
+            {
+              "file": "videos/observation.images.wrist_left/chunk-000/file-000.mp4",
+              "shape": [
+                180,
+                320,
+                3
+              ],
+              "min": 0,
+              "max": 255,
+              "std": 54.60618394017111
+            },
+            {
+              "file": "videos/observation.images.wrist_left/chunk-000/file-035.mp4",
+              "shape": [
+                180,
+                320,
+                3
+              ],
+              "min": 0,
+              "max": 255,
+              "std": 63.1258150087946
+            },
+            {
+              "file": "videos/observation.images.wrist_left/chunk-000/file-071.mp4",
+              "shape": [
+                180,
+                320,
+                3
+              ],
+              "min": 0,
+              "max": 255,
+              "std": 59.54572374397699
+            }
+          ]
+        }
+      ],
+      "missing_video_references": [],
+      "rh20t_numeric_full": {
+        "counts": {
+          "rows": 3898056,
+          "invalid_actions": 8176,
+          "nonfinite_states": 0,
+          "nonfinite_actions": 0,
+          "state_xyz_abs_gt1000": 4,
+          "action_xyz_abs_gt1000": 8,
+          "extreme_actions_marked_valid": 0,
+          "invalid_actions_nonterminal": 34,
+          "wrist_left_reused": 767455,
+          "wrist_left_gt100ms": 421983,
+          "wrist_left_gt500ms": 60309,
+          "exterior_1_left_reused": 0,
+          "exterior_1_left_gt100ms": 0,
+          "exterior_1_left_gt500ms": 0,
+          "exterior_2_left_reused": 210268,
+          "exterior_2_left_gt100ms": 6065,
+          "exterior_2_left_gt500ms": 1646
+        },
+        "extreme_states": [
+          {
+            "episode": 403,
+            "frame": 612,
+            "xyz": [
+              -3.5543094244408723e+36,
+              0.3065314292907715,
+              0.060835350304841995
+            ]
+          },
+          {
+            "episode": 1248,
+            "frame": 18,
+            "xyz": [
+              33554684,
+              0.000012896639418613631,
+              0.16991589963436127
+            ]
+          },
+          {
+            "episode": 3176,
+            "frame": 351,
+            "xyz": [
+              0.6349095702171326,
+              893467340618858500,
+              0.11872176826000214
+            ]
+          },
+          {
+            "episode": 4350,
+            "frame": 249,
+            "xyz": [
+              0.6189009547233582,
+              -0.10943639278411865,
+              1654714138624
+            ]
+          }
+        ],
+        "state_max_abs_xyz": 3.5543094244408723e+36,
+        "action_max_abs_xyz": 3.5543094244408723e+36,
+        "max_abs_camera_offset_ms": {
+          "wrist_left": 52201,
+          "exterior_1_left": 0,
+          "exterior_2_left": 2205
+        }
+      }
+    }
+  ],
+  "flow": [
+    {
+      "dataset": "droid_1.0.1_stage05_full_95658_20260831",
+      "manifest": "/opt/data/private/lq/datasets/droid_1.0.1_stage05_full_95658_20260831/stage06_flow/droid/manifest.d76a6dd745045034.jsonl",
+      "records": 9465,
+      "frames": 3573588,
+      "bytes_declared": 459824430575,
+      "unique_merged_ids": 9465,
+      "unique_source_ids": 9465,
+      "source_ids_missing_in_mapping": 0,
+      "source_join_length_mismatch": 0,
+      "merged_index_differs_from_source_join": 9465,
+      "missing_h5": 0,
+      "h5_size_mismatch": 0,
+      "missing_quality": 0,
+      "sample_h5": {
+        "path": "/opt/data/private/lq/datasets/droid_1.0.1_stage05_full_95658_20260831/stage06_flow/droid/episode_000000/shard_00000/rank_00000/flow.4d85cc19f8c28198.h5",
+        "keys": [
+          "actual_delta_frames",
+          "actual_delta_s",
+          "flow",
+          "frame_index",
+          "label_source",
+          "max_flow_magnitude",
+          "mean_flow_magnitude",
+          "source_timestamp_s",
+          "target_frame_index",
+          "target_timestamp_s",
+          "valid_fraction",
+          "valid_mask"
+        ],
+        "attrs": {
+          "artifact_identity": "4d85cc19f8c28198c3eae6a992ce024b349c3c4c31fda1817b5a731c83a13a20",
+          "camera_key": "observation.images.exterior_1_left",
+          "checkpoint_sha256": "6b8524bdce14f35abeaebdd11a315d28f7845a67d2f03225270243fe84423790",
+          "dataset_id": "droid",
+          "fix_width": "952",
+          "flow_direction": "forward_only",
+          "flow_units": "normalized_source_image_extent",
+          "fps": "15.0",
+          "generation_identity": "d76a6dd7450450341e0dc6692b2ed7470f2ca627c6ae080daa2f8d186918da76",
+          "label_identity": "cfcdba95b49cd8af979550afbfcd70f8fd0bc4a9403a295e28f512c8ab6a6024",
+          "merged_episode_index": "0",
+          "model_revision": "megaflow:ee5b61813db0a76ac0db9034899aade72a0d230c:tree:98f38c077fcb0a0ca88e96d02151c7cce71d71e09c66c36b995d029109ba85aa",
+          "nominal_delta_frames": "20",
+          "output_height": "224",
+          "output_width": "224",
+          "refinements": "8",
+          "schema_version": "stage06_flow_v2",
+          "source_episode_index": "21041",
+          "source_fingerprint": "32457ddb58c65ff2d56c33676353c3c7352593fd0eca1db034626de10a3ed291",
+          "source_height": "180",
+          "source_width": "320",
+          "tail_policy": "clamp",
+          "validity_semantics": "finite_and_forward_destination_in_bounds_not_occlusion"
+        },
+        "arrays": {
+          "actual_delta_frames": {
+            "shape": [
+              430
+            ],
+            "dtype": "int16"
+          },
+          "actual_delta_s": {
+            "shape": [
+              430
+            ],
+            "dtype": "float32"
+          },
+          "flow": {
+            "shape": [
+              430,
+              2,
+              224,
+              224
+            ],
+            "dtype": "float16"
+          },
+          "frame_index": {
+            "shape": [
+              430
+            ],
+            "dtype": "int64"
+          },
+          "label_source": {
+            "shape": [
+              430
+            ],
+            "dtype": "uint8"
+          },
+          "max_flow_magnitude": {
+            "shape": [
+              430
+            ],
+            "dtype": "float32"
+          },
+          "mean_flow_magnitude": {
+            "shape": [
+              430
+            ],
+            "dtype": "float32"
+          },
+          "source_timestamp_s": {
+            "shape": [
+              430
+            ],
+            "dtype": "float64"
+          },
+          "target_frame_index": {
+            "shape": [
+              430
+            ],
+            "dtype": "int64"
+          },
+          "target_timestamp_s": {
+            "shape": [
+              430
+            ],
+            "dtype": "float64"
+          },
+          "valid_fraction": {
+            "shape": [
+              430
+            ],
+            "dtype": "float32"
+          },
+          "valid_mask": {
+            "shape": [
+              430,
+              1,
+              224,
+              224
+            ],
+            "dtype": "uint8"
+          }
+        }
+      }
+    },
+    {
+      "dataset": "molmoact_dataset_household-v3_stage05",
+      "manifest": "/opt/data/private/lq/datasets/molmoact_dataset_household-v3_stage05/stage06_flow/molmoact_household/manifest.7a445e019d8e566c.jsonl",
+      "records": 5936,
+      "frames": 794199,
+      "bytes_declared": 107909507978,
+      "unique_merged_ids": 5936,
+      "unique_source_ids": 5936,
+      "source_ids_missing_in_mapping": 0,
+      "source_join_length_mismatch": 0,
+      "merged_index_differs_from_source_join": 0,
+      "missing_h5": 0,
+      "h5_size_mismatch": 0,
+      "missing_quality": 0,
+      "sample_h5": {
+        "path": "/opt/data/private/lq/datasets/molmoact_dataset_household-v3_stage05/stage06_flow/molmoact_household/episode_000000/shard_00000/rank_00000/flow.814342a1108ebda8.h5",
+        "keys": [
+          "actual_delta_frames",
+          "actual_delta_s",
+          "flow",
+          "frame_index",
+          "label_source",
+          "max_flow_magnitude",
+          "mean_flow_magnitude",
+          "source_timestamp_s",
+          "target_frame_index",
+          "target_timestamp_s",
+          "valid_fraction",
+          "valid_mask"
+        ],
+        "attrs": {
+          "artifact_identity": "814342a1108ebda81d33eb656bb45783710e031a83f590b7ed0b2ff3ea8b6eaa",
+          "camera_key": "first_view",
+          "checkpoint_sha256": "6b8524bdce14f35abeaebdd11a315d28f7845a67d2f03225270243fe84423790",
+          "dataset_id": "molmoact_household",
+          "fix_width": "952",
+          "flow_direction": "forward_only",
+          "flow_units": "normalized_source_image_extent",
+          "fps": "10.0",
+          "generation_identity": "7a445e019d8e566cb6cce4c8985a308ca88d07e804f04345857ced3b6088c888",
+          "label_identity": "f7531b4c5bf88e040c0cdd58d39047d55f1f125966134d3dd5d22b2fab390963",
+          "merged_episode_index": "0",
+          "model_revision": "megaflow:ee5b61813db0a76ac0db9034899aade72a0d230c:tree:98f38c077fcb0a0ca88e96d02151c7cce71d71e09c66c36b995d029109ba85aa",
+          "nominal_delta_frames": "20",
+          "output_height": "224",
+          "output_width": "224",
+          "refinements": "8",
+          "schema_version": "stage06_flow_v2",
+          "source_episode_index": "0",
+          "source_fingerprint": "35ff183719e32f01dd5586eb76b5724bba4bab24efd2f1135d85771740658f27",
+          "source_height": "480",
+          "source_width": "640",
+          "tail_policy": "clamp",
+          "validity_semantics": "finite_and_forward_destination_in_bounds_not_occlusion"
+        },
+        "arrays": {
+          "actual_delta_frames": {
+            "shape": [
+              167
+            ],
+            "dtype": "int16"
+          },
+          "actual_delta_s": {
+            "shape": [
+              167
+            ],
+            "dtype": "float32"
+          },
+          "flow": {
+            "shape": [
+              167,
+              2,
+              224,
+              224
+            ],
+            "dtype": "float16"
+          },
+          "frame_index": {
+            "shape": [
+              167
+            ],
+            "dtype": "int64"
+          },
+          "label_source": {
+            "shape": [
+              167
+            ],
+            "dtype": "uint8"
+          },
+          "max_flow_magnitude": {
+            "shape": [
+              167
+            ],
+            "dtype": "float32"
+          },
+          "mean_flow_magnitude": {
+            "shape": [
+              167
+            ],
+            "dtype": "float32"
+          },
+          "source_timestamp_s": {
+            "shape": [
+              167
+            ],
+            "dtype": "float64"
+          },
+          "target_frame_index": {
+            "shape": [
+              167
+            ],
+            "dtype": "int64"
+          },
+          "target_timestamp_s": {
+            "shape": [
+              167
+            ],
+            "dtype": "float64"
+          },
+          "valid_fraction": {
+            "shape": [
+              167
+            ],
+            "dtype": "float32"
+          },
+          "valid_mask": {
+            "shape": [
+              167,
+              1,
+              224,
+              224
+            ],
+            "dtype": "uint8"
+          }
+        }
+      }
+    },
+    {
+      "dataset": "molmoact_dataset_tabletop-v3_stage05",
+      "manifest": "/opt/data/private/lq/datasets/molmoact_dataset_tabletop-v3_stage05/stage06_flow/molmoact_tabletop/manifest.f61339e88e1b99c9.jsonl",
+      "records": 1881,
+      "frames": 310743,
+      "bytes_declared": 43243672217,
+      "unique_merged_ids": 1881,
+      "unique_source_ids": 1881,
+      "source_ids_missing_in_mapping": 0,
+      "source_join_length_mismatch": 0,
+      "merged_index_differs_from_source_join": 0,
+      "missing_h5": 0,
+      "h5_size_mismatch": 0,
+      "missing_quality": 0,
+      "sample_h5": {
+        "path": "/opt/data/private/lq/datasets/molmoact_dataset_tabletop-v3_stage05/stage06_flow/molmoact_tabletop/episode_000000/shard_00000/rank_00000/flow.2976c7f3253b991e.h5",
+        "keys": [
+          "actual_delta_frames",
+          "actual_delta_s",
+          "flow",
+          "frame_index",
+          "label_source",
+          "max_flow_magnitude",
+          "mean_flow_magnitude",
+          "source_timestamp_s",
+          "target_frame_index",
+          "target_timestamp_s",
+          "valid_fraction",
+          "valid_mask"
+        ],
+        "attrs": {
+          "artifact_identity": "2976c7f3253b991e69d4a2bd64bef0027aa90def7663eff86e251a69eac56bb4",
+          "camera_key": "first_view",
+          "checkpoint_sha256": "6b8524bdce14f35abeaebdd11a315d28f7845a67d2f03225270243fe84423790",
+          "dataset_id": "molmoact_tabletop",
+          "fix_width": "952",
+          "flow_direction": "forward_only",
+          "flow_units": "normalized_source_image_extent",
+          "fps": "10.0",
+          "generation_identity": "f61339e88e1b99c97e14336da1b2780665eac3a49a8a0b24ef9fe277c3998bb8",
+          "label_identity": "b0bed3e40b5e4625e27d38498297d432c0e536f6f5cc8a06025de17e3a77a7e2",
+          "merged_episode_index": "0",
+          "model_revision": "megaflow:ee5b61813db0a76ac0db9034899aade72a0d230c:tree:98f38c077fcb0a0ca88e96d02151c7cce71d71e09c66c36b995d029109ba85aa",
+          "nominal_delta_frames": "20",
+          "output_height": "224",
+          "output_width": "224",
+          "refinements": "8",
+          "schema_version": "stage06_flow_v2",
+          "source_episode_index": "0",
+          "source_fingerprint": "ca751ef800bd14b9a273c375cd9dad5c1e61f95cff0bdaf916772c0281de7844",
+          "source_height": "480",
+          "source_width": "640",
+          "tail_policy": "clamp",
+          "validity_semantics": "finite_and_forward_destination_in_bounds_not_occlusion"
+        },
+        "arrays": {
+          "actual_delta_frames": {
+            "shape": [
+              156
+            ],
+            "dtype": "int16"
+          },
+          "actual_delta_s": {
+            "shape": [
+              156
+            ],
+            "dtype": "float32"
+          },
+          "flow": {
+            "shape": [
+              156,
+              2,
+              224,
+              224
+            ],
+            "dtype": "float16"
+          },
+          "frame_index": {
+            "shape": [
+              156
+            ],
+            "dtype": "int64"
+          },
+          "label_source": {
+            "shape": [
+              156
+            ],
+            "dtype": "uint8"
+          },
+          "max_flow_magnitude": {
+            "shape": [
+              156
+            ],
+            "dtype": "float32"
+          },
+          "mean_flow_magnitude": {
+            "shape": [
+              156
+            ],
+            "dtype": "float32"
+          },
+          "source_timestamp_s": {
+            "shape": [
+              156
+            ],
+            "dtype": "float64"
+          },
+          "target_frame_index": {
+            "shape": [
+              156
+            ],
+            "dtype": "int64"
+          },
+          "target_timestamp_s": {
+            "shape": [
+              156
+            ],
+            "dtype": "float64"
+          },
+          "valid_fraction": {
+            "shape": [
+              156
+            ],
+            "dtype": "float32"
+          },
+          "valid_mask": {
+            "shape": [
+              156,
+              1,
+              224,
+              224
+            ],
+            "dtype": "uint8"
+          }
+        }
+      }
+    },
+    {
+      "dataset": "RH20T-v30_stage05",
+      "manifest": "/opt/data/private/lq/datasets/RH20T-v30_stage05/stage06_flow/rh20t/manifest.81ff8628f688bea5.jsonl",
+      "records": 8142,
+      "frames": 3898056,
+      "bytes_declared": 514954068295,
+      "unique_merged_ids": 8142,
+      "unique_source_ids": 8142,
+      "source_ids_missing_in_mapping": 0,
+      "source_join_length_mismatch": 0,
+      "merged_index_differs_from_source_join": 0,
+      "missing_h5": 0,
+      "h5_size_mismatch": 0,
+      "missing_quality": 0,
+      "sample_h5": {
+        "path": "/opt/data/private/lq/datasets/RH20T-v30_stage05/stage06_flow/rh20t/episode_000000/shard_00000/rank_00000/flow.98cd5cca8e6f4b31.h5",
+        "keys": [
+          "actual_delta_frames",
+          "actual_delta_s",
+          "flow",
+          "frame_index",
+          "label_source",
+          "max_flow_magnitude",
+          "mean_flow_magnitude",
+          "source_timestamp_s",
+          "target_frame_index",
+          "target_timestamp_s",
+          "valid_fraction",
+          "valid_mask"
+        ],
+        "attrs": {
+          "artifact_identity": "98cd5cca8e6f4b310529fcea1a94b41f0fcb4ddcc85c2995c0460dee0c21000a",
+          "camera_key": "observation.images.exterior_1_left",
+          "checkpoint_sha256": "6b8524bdce14f35abeaebdd11a315d28f7845a67d2f03225270243fe84423790",
+          "dataset_id": "rh20t",
+          "fix_width": "952",
+          "flow_direction": "forward_only",
+          "flow_units": "normalized_source_image_extent",
+          "fps": "10.0",
+          "generation_identity": "81ff8628f688bea54c235ed16287ad0ded5261d2ddc80ff2326495e90225c1aa",
+          "label_identity": "75780525ac6e1897681f31bf5042e4fe6a8f8a174dcdf3748b8c9e99ceb3d101",
+          "merged_episode_index": "0",
+          "model_revision": "megaflow:ee5b61813db0a76ac0db9034899aade72a0d230c:tree:98f38c077fcb0a0ca88e96d02151c7cce71d71e09c66c36b995d029109ba85aa",
+          "nominal_delta_frames": "20",
+          "output_height": "224",
+          "output_width": "224",
+          "refinements": "8",
+          "schema_version": "stage06_flow_v2",
+          "source_episode_index": "0",
+          "source_fingerprint": "ba6845b750f3823ae5af4b135e35589b5877a6752293202d9a25e5772e433791",
+          "source_height": "180",
+          "source_width": "320",
+          "tail_policy": "clamp",
+          "validity_semantics": "finite_and_forward_destination_in_bounds_not_occlusion"
+        },
+        "arrays": {
+          "actual_delta_frames": {
+            "shape": [
+              294
+            ],
+            "dtype": "int16"
+          },
+          "actual_delta_s": {
+            "shape": [
+              294
+            ],
+            "dtype": "float32"
+          },
+          "flow": {
+            "shape": [
+              294,
+              2,
+              224,
+              224
+            ],
+            "dtype": "float16"
+          },
+          "frame_index": {
+            "shape": [
+              294
+            ],
+            "dtype": "int64"
+          },
+          "label_source": {
+            "shape": [
+              294
+            ],
+            "dtype": "uint8"
+          },
+          "max_flow_magnitude": {
+            "shape": [
+              294
+            ],
+            "dtype": "float32"
+          },
+          "mean_flow_magnitude": {
+            "shape": [
+              294
+            ],
+            "dtype": "float32"
+          },
+          "source_timestamp_s": {
+            "shape": [
+              294
+            ],
+            "dtype": "float64"
+          },
+          "target_frame_index": {
+            "shape": [
+              294
+            ],
+            "dtype": "int64"
+          },
+          "target_timestamp_s": {
+            "shape": [
+              294
+            ],
+            "dtype": "float64"
+          },
+          "valid_fraction": {
+            "shape": [
+              294
+            ],
+            "dtype": "float32"
+          },
+          "valid_mask": {
+            "shape": [
+              294,
+              1,
+              224,
+              224
+            ],
+            "dtype": "uint8"
+          }
+        }
+      }
+    }
+  ],
+  "sidecars": [
+    {
+      "dataset": "droid",
+      "kind": "ar",
+      "path": "/opt/data/private/lq/ZR-0/outputs/stage05_four_dataset_pretraining_20260904/data_sidecars_v7/ar/droid",
+      "counts": {
+        "ar_eligible_frames": 9507523,
+        "joint_action_eligible_frames": null,
+        "joint_ar_eligible_frames": null,
+        "source_episodes": 95658,
+        "source_frames": 27630375,
+        "wrist_omitted_frames": 0,
+        "wrist_omitted_rate_given_main": 0
+      },
+      "content_hash": "77b52af750ee02229f370e4e4d51b77e5ae03a380373887ec979d333a375a45d",
+      "horizon": 32,
+      "observed_loader_result": "PASS",
+      "method": "load_stage05_sidecar(path, verify_source=True); observed in this audit, no exception bypass"
+    },
+    {
+      "dataset": "droid",
+      "kind": "joint",
+      "path": "/opt/data/private/lq/ZR-0/outputs/stage05_four_dataset_pretraining_20260904/data_sidecars_v7/joint/droid",
+      "counts": {
+        "ar_eligible_frames": 9507523,
+        "joint_action_eligible_frames": 19822892,
+        "joint_ar_eligible_frames": 9507474,
+        "source_episodes": 95658,
+        "source_frames": 27630375,
+        "wrist_omitted_frames": 0,
+        "wrist_omitted_rate_given_main": 0
+      },
+      "content_hash": "183419f103245b60cdff98ba7de4a7e2aedc7e28556297cfff82b6e1abdde9e6",
+      "horizon": 32,
+      "observed_loader_result": "FAIL: Stage05 sidecar generator is stale",
+      "method": "load_stage05_sidecar(path, verify_source=True); observed in this audit, no exception bypass"
+    },
+    {
+      "dataset": "household",
+      "kind": "ar",
+      "path": "/opt/data/private/lq/ZR-0/outputs/stage05_four_dataset_pretraining_20260904/data_sidecars_v7/ar/household",
+      "counts": {
+        "ar_eligible_frames": 794199,
+        "joint_action_eligible_frames": null,
+        "joint_ar_eligible_frames": null,
+        "source_episodes": 5936,
+        "source_frames": 794199,
+        "wrist_omitted_frames": 0,
+        "wrist_omitted_rate_given_main": 0
+      },
+      "content_hash": "27229f06da9c6e95b637121b9807da5a4e70761609cf95b3e527631ba7f93989",
+      "horizon": 32,
+      "observed_loader_result": "PASS",
+      "method": "load_stage05_sidecar(path, verify_source=True); observed in this audit, no exception bypass"
+    },
+    {
+      "dataset": "household",
+      "kind": "joint",
+      "path": "/opt/data/private/lq/ZR-0/outputs/stage05_four_dataset_pretraining_20260904/data_sidecars_v7/joint/household",
+      "counts": {
+        "ar_eligible_frames": 794199,
+        "joint_action_eligible_frames": 794199,
+        "joint_ar_eligible_frames": 794199,
+        "source_episodes": 5936,
+        "source_frames": 794199,
+        "wrist_omitted_frames": 0,
+        "wrist_omitted_rate_given_main": 0
+      },
+      "content_hash": "31e0ae1d85596fb215a283225e821b6937bdb1f8360bbeeac6faacfd150922dc",
+      "horizon": 32,
+      "observed_loader_result": "FAIL: Stage05 sidecar generator is stale",
+      "method": "load_stage05_sidecar(path, verify_source=True); observed in this audit, no exception bypass"
+    },
+    {
+      "dataset": "tabletop",
+      "kind": "ar",
+      "path": "/opt/data/private/lq/ZR-0/outputs/stage05_four_dataset_pretraining_20260904/data_sidecars_v7/ar/tabletop",
+      "counts": {
+        "ar_eligible_frames": 310743,
+        "joint_action_eligible_frames": null,
+        "joint_ar_eligible_frames": null,
+        "source_episodes": 1881,
+        "source_frames": 310743,
+        "wrist_omitted_frames": 0,
+        "wrist_omitted_rate_given_main": 0
+      },
+      "content_hash": "18037813d9970093a9b55ad9214bcb3dd004cbd9a9fb4dc64583b49b7b6e0c01",
+      "horizon": 32,
+      "observed_loader_result": "PASS",
+      "method": "load_stage05_sidecar(path, verify_source=True); observed in this audit, no exception bypass"
+    },
+    {
+      "dataset": "tabletop",
+      "kind": "joint",
+      "path": "/opt/data/private/lq/ZR-0/outputs/stage05_four_dataset_pretraining_20260904/data_sidecars_v7/joint/tabletop",
+      "counts": {
+        "ar_eligible_frames": 310743,
+        "joint_action_eligible_frames": 310743,
+        "joint_ar_eligible_frames": 310743,
+        "source_episodes": 1881,
+        "source_frames": 310743,
+        "wrist_omitted_frames": 0,
+        "wrist_omitted_rate_given_main": 0
+      },
+      "content_hash": "4acd1869621dec0588fab021d2b2440b1fb38a1b7927f3fb8694b93b2310440f",
+      "horizon": 32,
+      "observed_loader_result": "FAIL: Stage05 sidecar generator is stale",
+      "method": "load_stage05_sidecar(path, verify_source=True); observed in this audit, no exception bypass"
+    },
+    {
+      "dataset": "rh20t",
+      "kind": "ar",
+      "path": "/opt/data/private/lq/ZR-0/outputs/stage05_four_dataset_pretraining_20260904/data_sidecars_v7/ar/rh20t",
+      "counts": {
+        "ar_eligible_frames": 3509414,
+        "joint_action_eligible_frames": null,
+        "joint_ar_eligible_frames": null,
+        "source_episodes": 8142,
+        "source_frames": 3898056,
+        "wrist_omitted_frames": 421983,
+        "wrist_omitted_rate_given_main": 0.10825473005005572
+      },
+      "content_hash": "0b5875bd4c73132c01978d364f4463039909cf314b5faeac96e6b2209ed2ddad",
+      "horizon": 32,
+      "observed_loader_result": "PASS",
+      "method": "load_stage05_sidecar(path, verify_source=True); observed in this audit, no exception bypass"
+    },
+    {
+      "dataset": "rh20t",
+      "kind": "joint",
+      "path": "/opt/data/private/lq/ZR-0/outputs/stage05_four_dataset_pretraining_20260904/data_sidecars_v7/joint/rh20t",
+      "counts": {
+        "ar_eligible_frames": 3509414,
+        "joint_action_eligible_frames": 3501934,
+        "joint_ar_eligible_frames": 3501934,
+        "source_episodes": 8142,
+        "source_frames": 3898056,
+        "wrist_omitted_frames": 421983,
+        "wrist_omitted_rate_given_main": 0.10825473005005572
+      },
+      "content_hash": "02c4d52e6fd205aba160d3ac0cfe23464ad0ac320bd1641c3449f227b9789f5b",
+      "horizon": 32,
+      "observed_loader_result": "FAIL: Stage05 sidecar generator is stale",
+      "method": "load_stage05_sidecar(path, verify_source=True); observed in this audit, no exception bypass"
+    }
+  ],
+  "audited_code_sha256": {
+    "dataset2feature.yaml": "f078ae995d6f268018806a6cf72db280a736e42edf5474417d29e9e1181c9ce4",
+    "utils/stage05_sidecar.py": "7b26554931727ef299ca9e67aef71edf2c20cfb7bae70b899802fa2173062610",
+    "utils/stage05_canonical.py": "5d6b1d4398158bb6ffb6b4a1d72b47335f2e7bd79fa6065929d187c5bf699f0f",
+    "utils/stage05_dataset.py": "72f502c4ae611fe3172e8c2208cac4b0174f044b01a6f09d8cfc7affd92285b8"
+  },
+  "robotwin": {
+    "host": "lq@10.82.1.223:25408",
+    "root": "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905",
+    "shards": [
+      {
+        "status": "COMPLETED",
+        "started_at": "2026-09-05T14:38:58.709554+00:00",
+        "completed_at": "2026-09-07T18:31:22.946327+00:00",
+        "client_exit_status": 0,
+        "forward_audit_records": 625,
+        "start_seed": 100000,
+        "seed_stride": 4,
+        "client_config": {
+          "camera_shader_override": "default",
+          "ckpt_setting": "demo_clean",
+          "host": "127.0.0.1",
+          "instruction_type": "unseen",
+          "max_episode_steps": 400,
+          "n_action_steps": 16,
+          "n_episodes": 25,
+          "output_dir": "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-0/results",
+          "policy_name": "evaluation.RoboTwin.policy.ZR0.deploy_policy",
+          "port": 9100,
+          "rollout_started_path": "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-0/runtime/rollout_started.json",
+          "rt_denoiser_override": "none",
+          "runtime_progress_path": "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-0/runtime/client_progress.jsonl",
+          "seed": 0,
+          "seed_stride": 4,
+          "server_identity": "robotwin-formal-e5bceb0df811-b6a877fbf5cb4657a87e6c98a678dd8f",
+          "shard_count": 4,
+          "shard_index": 0,
+          "start_seed": 100000,
+          "task_config": "demo_randomized",
+          "task_name": "adjust_bottle",
+          "websocket_close_after_exchange": true,
+          "websocket_connect_immediately": false,
+          "websocket_ping_interval_s": null,
+          "websocket_ping_timeout_s": null
+        },
+        "client_command": [
+          "/opt/data/private/lq/ZR-0-eval-envs/robotwin-client-bd56120/bin/python3.10",
+          "/opt/data/private/lq/ZR-0-worktrees/robotwin-reconstructed-normalization-smoke/evaluation/RoboTwin/script/eval_policy_client.py",
+          "--config",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-0/runtime/formal_eval_config.json"
+        ],
+        "server_command": [
+          "/opt/data/private/lq/miniconda3/envs/ZR-0/bin/python3.10",
+          "-m",
+          "evaluation.robotwin_eval.formal_server_wrapper",
+          "--artifact-dir",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/artifacts/normalization-v1/e5bceb0df81182e9a48fafe71012a55b6245cf7c3da798d68bdf7a068679be3c",
+          "--checkpoint-dir",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-reconstructed-normalization-smoke-20260905/inputs/ZR-0-robotwin",
+          "--dataset-root",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-reconstructed-normalization-smoke-proxy-v3-20260905/inputs/public-robotwin-v3",
+          "--repo-root",
+          "/opt/data/private/lq/ZR-0-worktrees/robotwin-reconstructed-normalization-smoke",
+          "--authorization",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-0/runtime/formal_authorization.json",
+          "--authorization-sha256",
+          "c3fa89604c59a54e4766f5a083ae06158b6b3aaf278bc9bfdfa8215bc351bb98",
+          "--shim-root",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-0/runtime/shim",
+          "--port",
+          "9100",
+          "--server-identity",
+          "robotwin-formal-e5bceb0df811-b6a877fbf5cb4657a87e6c98a678dd8f",
+          "--forward-audit-path",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-0/runtime/forward_audit.jsonl",
+          "--attention-backend",
+          "eager",
+          "--formal-wrapper-version",
+          "robotwin_formal_reconstructed_v7_one_shot_websocket"
+        ],
+        "checkpoint_weights_sha256": "6b9d5a77ec2105f731bb8d5a738689a3721dd76e8424391217cccd043327f9f9",
+        "source_snapshot_sha256": "d5c5687f67d9ea05ebe120bf5bfb17cc0475f48579a2b272b8c4ac44d6cb2e64",
+        "artifact_id": "e5bceb0df81182e9a48fafe71012a55b6245cf7c3da798d68bdf7a068679be3c",
+        "normalization_origin": "reconstructed_public_data",
+        "publication_warning": "RECONSTRUCTED_DO_NOT_PUBLISH",
+        "result_file": "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-0/results/adjust_bottle/evaluation.RoboTwin.policy.ZR0.deploy_policy/demo_randomized/demo_clean/2026-09-05 22:40:34/_result.txt",
+        "result_sha256": "cae2c5d01b740d618659f1f336d6635b10b678bbd3d18eee3c6b0bcae39e4a4b",
+        "last_forward_audit": {
+          "action_shape": [
+            1,
+            16,
+            14
+          ],
+          "actions_finite": true,
+          "batch_size": 1,
+          "cuda_max_memory_reserved_bytes": 6587154432,
+          "dit_forward_count": 5,
+          "num_denoised_steps": 5,
+          "processor_image_grid_thw": [
+            [
+              1,
+              14,
+              14
+            ],
+            [
+              1,
+              14,
+              14
+            ],
+            [
+              1,
+              14,
+              14
+            ]
+          ],
+          "processor_tensor_shapes": {
+            "image_grid_thw": [
+              3,
+              3
+            ],
+            "pixel_values": [
+              588,
+              1536
+            ]
+          },
+          "schema_version": 1,
+          "vlm_forward_count": 1
+        },
+        "gpu": 0,
+        "result_text": "Timestamp: 2026-09-05 22:40:34\n\nInstruction Type: unseen\n\nSuccess: 0/25\nSuccess Rate: 0.000000\n",
+        "actual_result_sha256": "cae2c5d01b740d618659f1f336d6635b10b678bbd3d18eee3c6b0bcae39e4a4b",
+        "forward_lines": 625,
+        "all_forward_actions_finite": true,
+        "video_count": 25,
+        "actions_per_episode": {
+          "0": 400,
+          "1": 400,
+          "2": 400,
+          "3": 400,
+          "4": 400,
+          "5": 400,
+          "6": 400,
+          "7": 400,
+          "8": 400,
+          "9": 400,
+          "10": 400,
+          "11": 400,
+          "12": 400,
+          "13": 400,
+          "14": 400,
+          "15": 400,
+          "16": 400,
+          "17": 400,
+          "18": 400,
+          "19": 400,
+          "20": 400,
+          "21": 400,
+          "22": 400,
+          "23": 400,
+          "24": 400
+        },
+        "progress_records": 21250,
+        "all_executed_actions_finite": true
+      },
+      {
+        "status": "COMPLETED",
+        "started_at": "2026-09-05T14:38:58.712298+00:00",
+        "completed_at": "2026-09-07T17:09:57.838153+00:00",
+        "client_exit_status": 0,
+        "forward_audit_records": 625,
+        "start_seed": 100001,
+        "seed_stride": 4,
+        "client_config": {
+          "camera_shader_override": "default",
+          "ckpt_setting": "demo_clean",
+          "host": "127.0.0.1",
+          "instruction_type": "unseen",
+          "max_episode_steps": 400,
+          "n_action_steps": 16,
+          "n_episodes": 25,
+          "output_dir": "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-1/results",
+          "policy_name": "evaluation.RoboTwin.policy.ZR0.deploy_policy",
+          "port": 9101,
+          "rollout_started_path": "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-1/runtime/rollout_started.json",
+          "rt_denoiser_override": "none",
+          "runtime_progress_path": "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-1/runtime/client_progress.jsonl",
+          "seed": 0,
+          "seed_stride": 4,
+          "server_identity": "robotwin-formal-e5bceb0df811-5fd77107012c4819b5dc33e4da21bc0c",
+          "shard_count": 4,
+          "shard_index": 1,
+          "start_seed": 100001,
+          "task_config": "demo_randomized",
+          "task_name": "adjust_bottle",
+          "websocket_close_after_exchange": true,
+          "websocket_connect_immediately": false,
+          "websocket_ping_interval_s": null,
+          "websocket_ping_timeout_s": null
+        },
+        "client_command": [
+          "/opt/data/private/lq/ZR-0-eval-envs/robotwin-client-bd56120/bin/python3.10",
+          "/opt/data/private/lq/ZR-0-worktrees/robotwin-reconstructed-normalization-smoke/evaluation/RoboTwin/script/eval_policy_client.py",
+          "--config",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-1/runtime/formal_eval_config.json"
+        ],
+        "server_command": [
+          "/opt/data/private/lq/miniconda3/envs/ZR-0/bin/python3.10",
+          "-m",
+          "evaluation.robotwin_eval.formal_server_wrapper",
+          "--artifact-dir",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/artifacts/normalization-v1/e5bceb0df81182e9a48fafe71012a55b6245cf7c3da798d68bdf7a068679be3c",
+          "--checkpoint-dir",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-reconstructed-normalization-smoke-20260905/inputs/ZR-0-robotwin",
+          "--dataset-root",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-reconstructed-normalization-smoke-proxy-v3-20260905/inputs/public-robotwin-v3",
+          "--repo-root",
+          "/opt/data/private/lq/ZR-0-worktrees/robotwin-reconstructed-normalization-smoke",
+          "--authorization",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-1/runtime/formal_authorization.json",
+          "--authorization-sha256",
+          "26baddad53a20c8fd1037890226c6e6d1a2b9aaadd34877f5f07a59ccb1d7dcf",
+          "--shim-root",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-1/runtime/shim",
+          "--port",
+          "9101",
+          "--server-identity",
+          "robotwin-formal-e5bceb0df811-5fd77107012c4819b5dc33e4da21bc0c",
+          "--forward-audit-path",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-1/runtime/forward_audit.jsonl",
+          "--attention-backend",
+          "eager",
+          "--formal-wrapper-version",
+          "robotwin_formal_reconstructed_v7_one_shot_websocket"
+        ],
+        "checkpoint_weights_sha256": "6b9d5a77ec2105f731bb8d5a738689a3721dd76e8424391217cccd043327f9f9",
+        "source_snapshot_sha256": "d5c5687f67d9ea05ebe120bf5bfb17cc0475f48579a2b272b8c4ac44d6cb2e64",
+        "artifact_id": "e5bceb0df81182e9a48fafe71012a55b6245cf7c3da798d68bdf7a068679be3c",
+        "normalization_origin": "reconstructed_public_data",
+        "publication_warning": "RECONSTRUCTED_DO_NOT_PUBLISH",
+        "result_file": "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-1/results/adjust_bottle/evaluation.RoboTwin.policy.ZR0.deploy_policy/demo_randomized/demo_clean/2026-09-05 22:40:33/_result.txt",
+        "result_sha256": "5f066c151181a89224606ac2b06abc3dbcb057120440c9d201c820c799dd4f3d",
+        "last_forward_audit": {
+          "action_shape": [
+            1,
+            16,
+            14
+          ],
+          "actions_finite": true,
+          "batch_size": 1,
+          "cuda_max_memory_reserved_bytes": 6587154432,
+          "dit_forward_count": 5,
+          "num_denoised_steps": 5,
+          "processor_image_grid_thw": [
+            [
+              1,
+              14,
+              14
+            ],
+            [
+              1,
+              14,
+              14
+            ],
+            [
+              1,
+              14,
+              14
+            ]
+          ],
+          "processor_tensor_shapes": {
+            "image_grid_thw": [
+              3,
+              3
+            ],
+            "pixel_values": [
+              588,
+              1536
+            ]
+          },
+          "schema_version": 1,
+          "vlm_forward_count": 1
+        },
+        "gpu": 1,
+        "result_text": "Timestamp: 2026-09-05 22:40:33\n\nInstruction Type: unseen\n\nSuccess: 0/25\nSuccess Rate: 0.000000\n",
+        "actual_result_sha256": "5f066c151181a89224606ac2b06abc3dbcb057120440c9d201c820c799dd4f3d",
+        "forward_lines": 625,
+        "all_forward_actions_finite": true,
+        "video_count": 25,
+        "actions_per_episode": {
+          "0": 400,
+          "1": 400,
+          "2": 400,
+          "3": 400,
+          "4": 400,
+          "5": 400,
+          "6": 400,
+          "7": 400,
+          "8": 400,
+          "9": 400,
+          "10": 400,
+          "11": 400,
+          "12": 400,
+          "13": 400,
+          "14": 400,
+          "15": 400,
+          "16": 400,
+          "17": 400,
+          "18": 400,
+          "19": 400,
+          "20": 400,
+          "21": 400,
+          "22": 400,
+          "23": 400,
+          "24": 400
+        },
+        "progress_records": 21250,
+        "all_executed_actions_finite": true
+      },
+      {
+        "status": "COMPLETED",
+        "started_at": "2026-09-05T14:38:58.708292+00:00",
+        "completed_at": "2026-09-07T18:15:10.821228+00:00",
+        "client_exit_status": 0,
+        "forward_audit_records": 625,
+        "start_seed": 100002,
+        "seed_stride": 4,
+        "client_config": {
+          "camera_shader_override": "default",
+          "ckpt_setting": "demo_clean",
+          "host": "127.0.0.1",
+          "instruction_type": "unseen",
+          "max_episode_steps": 400,
+          "n_action_steps": 16,
+          "n_episodes": 25,
+          "output_dir": "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-2/results",
+          "policy_name": "evaluation.RoboTwin.policy.ZR0.deploy_policy",
+          "port": 9102,
+          "rollout_started_path": "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-2/runtime/rollout_started.json",
+          "rt_denoiser_override": "none",
+          "runtime_progress_path": "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-2/runtime/client_progress.jsonl",
+          "seed": 0,
+          "seed_stride": 4,
+          "server_identity": "robotwin-formal-e5bceb0df811-4082238d98934c6abbf771653c26a7ae",
+          "shard_count": 4,
+          "shard_index": 2,
+          "start_seed": 100002,
+          "task_config": "demo_randomized",
+          "task_name": "adjust_bottle",
+          "websocket_close_after_exchange": true,
+          "websocket_connect_immediately": false,
+          "websocket_ping_interval_s": null,
+          "websocket_ping_timeout_s": null
+        },
+        "client_command": [
+          "/opt/data/private/lq/ZR-0-eval-envs/robotwin-client-bd56120/bin/python3.10",
+          "/opt/data/private/lq/ZR-0-worktrees/robotwin-reconstructed-normalization-smoke/evaluation/RoboTwin/script/eval_policy_client.py",
+          "--config",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-2/runtime/formal_eval_config.json"
+        ],
+        "server_command": [
+          "/opt/data/private/lq/miniconda3/envs/ZR-0/bin/python3.10",
+          "-m",
+          "evaluation.robotwin_eval.formal_server_wrapper",
+          "--artifact-dir",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/artifacts/normalization-v1/e5bceb0df81182e9a48fafe71012a55b6245cf7c3da798d68bdf7a068679be3c",
+          "--checkpoint-dir",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-reconstructed-normalization-smoke-20260905/inputs/ZR-0-robotwin",
+          "--dataset-root",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-reconstructed-normalization-smoke-proxy-v3-20260905/inputs/public-robotwin-v3",
+          "--repo-root",
+          "/opt/data/private/lq/ZR-0-worktrees/robotwin-reconstructed-normalization-smoke",
+          "--authorization",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-2/runtime/formal_authorization.json",
+          "--authorization-sha256",
+          "d3a6865facc7576d81c93a3c7e994cd1b0a20b63c0871193769b03d6772ddfc0",
+          "--shim-root",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-2/runtime/shim",
+          "--port",
+          "9102",
+          "--server-identity",
+          "robotwin-formal-e5bceb0df811-4082238d98934c6abbf771653c26a7ae",
+          "--forward-audit-path",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-2/runtime/forward_audit.jsonl",
+          "--attention-backend",
+          "eager",
+          "--formal-wrapper-version",
+          "robotwin_formal_reconstructed_v7_one_shot_websocket"
+        ],
+        "checkpoint_weights_sha256": "6b9d5a77ec2105f731bb8d5a738689a3721dd76e8424391217cccd043327f9f9",
+        "source_snapshot_sha256": "d5c5687f67d9ea05ebe120bf5bfb17cc0475f48579a2b272b8c4ac44d6cb2e64",
+        "artifact_id": "e5bceb0df81182e9a48fafe71012a55b6245cf7c3da798d68bdf7a068679be3c",
+        "normalization_origin": "reconstructed_public_data",
+        "publication_warning": "RECONSTRUCTED_DO_NOT_PUBLISH",
+        "result_file": "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-2/results/adjust_bottle/evaluation.RoboTwin.policy.ZR0.deploy_policy/demo_randomized/demo_clean/2026-09-05 22:40:34/_result.txt",
+        "result_sha256": "cae2c5d01b740d618659f1f336d6635b10b678bbd3d18eee3c6b0bcae39e4a4b",
+        "last_forward_audit": {
+          "action_shape": [
+            1,
+            16,
+            14
+          ],
+          "actions_finite": true,
+          "batch_size": 1,
+          "cuda_max_memory_reserved_bytes": 6587154432,
+          "dit_forward_count": 5,
+          "num_denoised_steps": 5,
+          "processor_image_grid_thw": [
+            [
+              1,
+              14,
+              14
+            ],
+            [
+              1,
+              14,
+              14
+            ],
+            [
+              1,
+              14,
+              14
+            ]
+          ],
+          "processor_tensor_shapes": {
+            "image_grid_thw": [
+              3,
+              3
+            ],
+            "pixel_values": [
+              588,
+              1536
+            ]
+          },
+          "schema_version": 1,
+          "vlm_forward_count": 1
+        },
+        "gpu": 2,
+        "result_text": "Timestamp: 2026-09-05 22:40:34\n\nInstruction Type: unseen\n\nSuccess: 0/25\nSuccess Rate: 0.000000\n",
+        "actual_result_sha256": "cae2c5d01b740d618659f1f336d6635b10b678bbd3d18eee3c6b0bcae39e4a4b",
+        "forward_lines": 625,
+        "all_forward_actions_finite": true,
+        "video_count": 25,
+        "actions_per_episode": {
+          "0": 400,
+          "1": 400,
+          "2": 400,
+          "3": 400,
+          "4": 400,
+          "5": 400,
+          "6": 400,
+          "7": 400,
+          "8": 400,
+          "9": 400,
+          "10": 400,
+          "11": 400,
+          "12": 400,
+          "13": 400,
+          "14": 400,
+          "15": 400,
+          "16": 400,
+          "17": 400,
+          "18": 400,
+          "19": 400,
+          "20": 400,
+          "21": 400,
+          "22": 400,
+          "23": 400,
+          "24": 400
+        },
+        "progress_records": 21250,
+        "all_executed_actions_finite": true
+      },
+      {
+        "status": "COMPLETED",
+        "started_at": "2026-09-05T14:38:58.726452+00:00",
+        "completed_at": "2026-09-07T17:27:06.057801+00:00",
+        "client_exit_status": 0,
+        "forward_audit_records": 625,
+        "start_seed": 100003,
+        "seed_stride": 4,
+        "client_config": {
+          "camera_shader_override": "default",
+          "ckpt_setting": "demo_clean",
+          "host": "127.0.0.1",
+          "instruction_type": "unseen",
+          "max_episode_steps": 400,
+          "n_action_steps": 16,
+          "n_episodes": 25,
+          "output_dir": "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-3/results",
+          "policy_name": "evaluation.RoboTwin.policy.ZR0.deploy_policy",
+          "port": 9103,
+          "rollout_started_path": "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-3/runtime/rollout_started.json",
+          "rt_denoiser_override": "none",
+          "runtime_progress_path": "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-3/runtime/client_progress.jsonl",
+          "seed": 0,
+          "seed_stride": 4,
+          "server_identity": "robotwin-formal-e5bceb0df811-b0ef67bc611a4c8baa9478a3e56432c6",
+          "shard_count": 4,
+          "shard_index": 3,
+          "start_seed": 100003,
+          "task_config": "demo_randomized",
+          "task_name": "adjust_bottle",
+          "websocket_close_after_exchange": true,
+          "websocket_connect_immediately": false,
+          "websocket_ping_interval_s": null,
+          "websocket_ping_timeout_s": null
+        },
+        "client_command": [
+          "/opt/data/private/lq/ZR-0-eval-envs/robotwin-client-bd56120/bin/python3.10",
+          "/opt/data/private/lq/ZR-0-worktrees/robotwin-reconstructed-normalization-smoke/evaluation/RoboTwin/script/eval_policy_client.py",
+          "--config",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-3/runtime/formal_eval_config.json"
+        ],
+        "server_command": [
+          "/opt/data/private/lq/miniconda3/envs/ZR-0/bin/python3.10",
+          "-m",
+          "evaluation.robotwin_eval.formal_server_wrapper",
+          "--artifact-dir",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/artifacts/normalization-v1/e5bceb0df81182e9a48fafe71012a55b6245cf7c3da798d68bdf7a068679be3c",
+          "--checkpoint-dir",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-reconstructed-normalization-smoke-20260905/inputs/ZR-0-robotwin",
+          "--dataset-root",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-reconstructed-normalization-smoke-proxy-v3-20260905/inputs/public-robotwin-v3",
+          "--repo-root",
+          "/opt/data/private/lq/ZR-0-worktrees/robotwin-reconstructed-normalization-smoke",
+          "--authorization",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-3/runtime/formal_authorization.json",
+          "--authorization-sha256",
+          "8ffe8d1347d5e9d9e7ff2b798a3dfe6cffc58c5679daffcd65388bf20e3876c4",
+          "--shim-root",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-3/runtime/shim",
+          "--port",
+          "9103",
+          "--server-identity",
+          "robotwin-formal-e5bceb0df811-b0ef67bc611a4c8baa9478a3e56432c6",
+          "--forward-audit-path",
+          "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-3/runtime/forward_audit.jsonl",
+          "--attention-backend",
+          "eager",
+          "--formal-wrapper-version",
+          "robotwin_formal_reconstructed_v7_one_shot_websocket"
+        ],
+        "checkpoint_weights_sha256": "6b9d5a77ec2105f731bb8d5a738689a3721dd76e8424391217cccd043327f9f9",
+        "source_snapshot_sha256": "d5c5687f67d9ea05ebe120bf5bfb17cc0475f48579a2b272b8c4ac44d6cb2e64",
+        "artifact_id": "e5bceb0df81182e9a48fafe71012a55b6245cf7c3da798d68bdf7a068679be3c",
+        "normalization_origin": "reconstructed_public_data",
+        "publication_warning": "RECONSTRUCTED_DO_NOT_PUBLISH",
+        "result_file": "/opt/data/private/lq/ZR-0-experiments/robotwin-formal-eval-reconstructed-parallel-raster-v3-20260905/shards/gpu-3/results/adjust_bottle/evaluation.RoboTwin.policy.ZR0.deploy_policy/demo_randomized/demo_clean/2026-09-05 22:40:33/_result.txt",
+        "result_sha256": "5f066c151181a89224606ac2b06abc3dbcb057120440c9d201c820c799dd4f3d",
+        "last_forward_audit": {
+          "action_shape": [
+            1,
+            16,
+            14
+          ],
+          "actions_finite": true,
+          "batch_size": 1,
+          "cuda_max_memory_reserved_bytes": 6587154432,
+          "dit_forward_count": 5,
+          "num_denoised_steps": 5,
+          "processor_image_grid_thw": [
+            [
+              1,
+              14,
+              14
+            ],
+            [
+              1,
+              14,
+              14
+            ],
+            [
+              1,
+              14,
+              14
+            ]
+          ],
+          "processor_tensor_shapes": {
+            "image_grid_thw": [
+              3,
+              3
+            ],
+            "pixel_values": [
+              588,
+              1536
+            ]
+          },
+          "schema_version": 1,
+          "vlm_forward_count": 1
+        },
+        "gpu": 3,
+        "result_text": "Timestamp: 2026-09-05 22:40:33\n\nInstruction Type: unseen\n\nSuccess: 0/25\nSuccess Rate: 0.000000\n",
+        "actual_result_sha256": "5f066c151181a89224606ac2b06abc3dbcb057120440c9d201c820c799dd4f3d",
+        "forward_lines": 625,
+        "all_forward_actions_finite": true,
+        "video_count": 25,
+        "actions_per_episode": {
+          "0": 400,
+          "1": 400,
+          "2": 400,
+          "3": 400,
+          "4": 400,
+          "5": 400,
+          "6": 400,
+          "7": 400,
+          "8": 400,
+          "9": 400,
+          "10": 400,
+          "11": 400,
+          "12": 400,
+          "13": 400,
+          "14": 400,
+          "15": 400,
+          "16": 400,
+          "17": 400,
+          "18": 400,
+          "19": 400,
+          "20": 400,
+          "21": 400,
+          "22": 400,
+          "23": 400,
+          "24": 400
+        },
+        "progress_records": 21250,
+        "all_executed_actions_finite": true
+      }
+    ]
+  }
+}

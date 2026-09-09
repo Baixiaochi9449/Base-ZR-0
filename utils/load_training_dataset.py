@@ -1241,3 +1241,32 @@ def set_dataloader_epoch(dataloader, epoch_sampler, epoch):
     set_epoch = getattr(dataloader, "set_epoch", None)
     if callable(set_epoch):
         set_epoch(epoch)
+
+
+def validate_fast_resume_datasets(concat_dataset):
+    from utils.stage05_dataset import Stage05MixedPretrainingDataset
+    from utils.slot_supervision import SlotSupervisedDataset
+    for dataset in concat_dataset.datasets:
+        if type(dataset) is SlotSupervisedDataset:
+            dataset = dataset.dataset
+        if type(dataset) is not Stage05MixedPretrainingDataset or not dataset.frozen_index:
+            raise ValueError("fast data resume requires deterministic frozen Stage05 datasets")
+
+
+def resume_dataloader_at_batch(dataloader, epoch_sampler, *, epoch, batch_idx):
+    """Skip indices before dataset reads; retain the caller's absolute batch cursor."""
+    if type(batch_idx) is not int or not 0 <= batch_idx <= len(dataloader):
+        raise ValueError("resume batch cursor is outside the saved epoch")
+    if batch_idx == len(dataloader):
+        # An empty DataLoaderShard may yield None; an epoch-boundary resume is empty.
+        return ()
+    if batch_idx:
+        from accelerate import skip_first_batches
+        original_sampler = dataloader.batch_sampler
+        dataloader = skip_first_batches(dataloader, num_batches=batch_idx)
+        # Accelerate's skip wrapper omits the attributes used to compute tail remainder.
+        for name in ("batch_size", "num_processes", "split_batches"):
+            if hasattr(original_sampler, name):
+                setattr(dataloader.batch_sampler, name, getattr(original_sampler, name))
+    set_dataloader_epoch(dataloader, epoch_sampler, epoch)
+    return dataloader

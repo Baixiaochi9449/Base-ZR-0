@@ -22,6 +22,14 @@ demo_data.droid_1.0.1_lerobot
 ```
 demo_data.robotwin2.0-aloha-agilex
 ```
+In this checkout, the RoboTwin entry uses metadata exported from the local
+`/opt/data/private/lq/datasets/lerobot/robotwin_unified` v3 dataset, with q01/q99
+recomputed over all frames. The user explicitly accepted this for diagnostic
+evaluation. These are not author-provided ZR-0 checkpoint statistics, and their
+equivalence to the checkpoint's training normalization is unverified. See
+`robotwin2.0-aloha-agilex/meta/provenance.json` and its directory README.
+This metadata-only export contains no training trajectories or videos.
+
 **Robocasa GR1 Tabletop Tasks**
 ```
 demo_data.robocasa_gr1_tabletop_tasks.gr1_unified.PosttrainPnPNovelFromCuttingboardToPotSplitA

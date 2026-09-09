@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "preparation_config": "/opt/data/private/lq/ZR-0/configs/three_stage_validation_20260908.json",
+  "experiment": "three_stage_formal_20260909",
+  "output_root": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260909",
+  "wandb_project": "zr0-three-stage-formal",
+  "stage_updates": [10000, 5000, 150000],
+  "authorization": "User explicitly requested Stage 1 10,000 / Stage 2 5,000 / Stage 3 150,000 formal training after completed validation."
+}

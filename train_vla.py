@@ -348,9 +348,16 @@ def module_gradient_norms(model, accelerator) -> dict[str, torch.Tensor]:
     return metrics
 
 
-def build_adamw_optimizer(model, *, learning_rate, beta1, beta2, epsilon):
+def build_adamw_optimizer(model, *, learning_rate, beta1, beta2, epsilon, component_groups=False):
+    parameters = get_trainable_parameters(model)
+    if component_groups:
+        grouped = {owner: [] for owner in PARAMETER_OWNERS}
+        for name, parameter in model.named_parameters():
+            if parameter.requires_grad:
+                grouped[trainable_parameter_owner(name)].append(parameter)
+        parameters = [{"params": values, "component": owner} for owner, values in grouped.items() if values]
     return AdamW(
-        get_trainable_parameters(model),
+        parameters,
         lr=learning_rate,
         betas=(beta1, beta2),
         eps=epsilon,
@@ -462,6 +469,7 @@ def run_optimizer_step_window(
     optical_flow_config=None,
     training_stage=None,
     slot_config=None,
+    batch_metric_reductions: bool = False,
 ):
     batches = list(batches)
     if not batches:
@@ -483,10 +491,16 @@ def run_optimizer_step_window(
     )
     activity = counts.activity_metrics(loss_type=loss_type, vlm_loss_weight=vlm_loss_weight,
         action_expert_loss_weight=action_expert_loss_weight, optical_flow_config=optical_flow_config, slot_config=slot_config)
+    bare_model = getattr(model, "module", model)
+    group_guard = getattr(bare_model, "component_update_guard", None)
+    if group_guard is not None:
+        group_guard.begin(activity, detach_action=getattr(bare_model, "detach_vlm_outputs_for_action_expert", False),
+            global_step=next_global_step - 1)
     if not activity["active_supervision_available"]:
         from utils.optical_flow_config import stage_loss_metadata
         from utils.optimizer_step_loss import optimizer_step_result
         return {**optimizer_step_result(applied=False, reason="no_supervision"), **activity,
+                **(group_guard.finish(applied=False) if group_guard else {}),
                 **({"flow_eligible_samples": counts.flow_samples, "flow_coverage": counts.flow_samples} if counts.flow_samples is not None else {}),
                 **({"slot_sample_coverage": counts.slot_covered_samples / counts.batch_samples.clamp_min(1),
                     "slot_available": bool(counts.slot_samples.sum() > 0),
@@ -503,6 +517,7 @@ def run_optimizer_step_window(
         action_expert_loss_weight=action_expert_loss_weight,
         collect_diagnostics=collect_training_diagnostics,
         device=accelerator.device,
+        batch_metric_reductions=batch_metric_reductions,
     )
     optimizer.zero_grad()
     is_deepspeed = accelerator.distributed_type == DistributedType.DEEPSPEED
@@ -583,6 +598,8 @@ def run_optimizer_step_window(
     elif collect_training_diagnostics:
         diagnostic_metrics.update(module_gradient_norms(model, accelerator))
     step_result = step.finish()
+    if group_guard is not None:
+        diagnostic_metrics.update(group_guard.finish(applied=step_result["optimizer_update_applied"]))
     optimizer.zero_grad()
     metrics = accumulator.finalize(accelerator)
     if slot_enabled:
@@ -657,11 +674,25 @@ def tensorboard_loss_value(value) -> float:
     return float(value.detach().float()) if isinstance(value, torch.Tensor) else float(value)
 
 
-def json_scalar_metrics(metrics: dict) -> dict:
-    return {
-        name: value if isinstance(value, (str, bool)) else tensorboard_loss_value(value)
-        for name, value in metrics.items()
-    }
+def json_scalar_metrics(metrics: dict, *, batch_tensors: bool = False) -> dict:
+    if not batch_tensors:
+        return {
+            name: value if isinstance(value, (str, bool)) else tensorboard_loss_value(value)
+            for name, value in metrics.items()
+        }
+    result, device_tensors = {}, {}
+    for name, value in metrics.items():
+        if isinstance(value, torch.Tensor):
+            if value.numel() != 1:
+                raise ValueError("only one element tensors can be converted to Python scalars")
+            result[name] = None
+            device_tensors.setdefault(value.device, []).append((name, value))
+        else:
+            result[name] = value if isinstance(value, (str, bool)) else tensorboard_loss_value(value)
+    for entries in device_tensors.values():
+        values = torch.stack([value.detach().float().reshape(()) for _, value in entries]).cpu().tolist()
+        result.update(zip((name for name, _ in entries), values))
+    return result
 
 
 def tensorboard_loss_metric_name(output_name: str) -> str:
@@ -669,6 +700,26 @@ def tensorboard_loss_metric_name(output_name: str) -> str:
         "vlm_loss": "vlm-loss",
         "action_expert_loss": "action-expert-loss",
     }.get(output_name, output_name)
+
+def write_tensorboard_training_metrics(writer, metrics, step, *, local_scalars=None):
+    summary = None
+    if local_scalars is not None:
+        from tensorboard.compat.proto.summary_pb2 import Summary
+        from torch.utils.tensorboard.summary import scalar
+        summary = Summary()
+    for name, value in metrics.items():
+        if isinstance(value, str):
+            writer.add_text('train-' + name, value, step)
+            continue
+        tag = 'train-{}'.format(tensorboard_loss_metric_name(name))
+        value = tensorboard_loss_value(local_scalars[name] if local_scalars is not None else value)
+        if summary is None:
+            writer.add_scalar(tag, value, step)
+        else:
+            summary.value.extend(scalar(tag, value).value)
+    if summary is not None and summary.value:
+        writer.file_writer.add_summary(summary, step)
+
 
 def get_absolute_path(path):
     if os.path.isabs(path):
@@ -836,6 +887,9 @@ def resolve_action_expert_config(opt, *, return_resolved=False):
         and getattr(opt, "loss_type", None) in ("action", "vlm_and_action")
         and purpose is None
     )
+    if (getattr(opt, "bounded_three_stage_validation", False) or
+            getattr(opt, "verify_three_stage_initialization", False)) and not opt.resume_training:
+        allow_horizon_override = True
     horizon_arguments = (
         {"action_horizon_override": opt.action_horizon}
         if allow_horizon_override
@@ -864,7 +918,21 @@ def resolve_action_expert_config(opt, *, return_resolved=False):
 
 
 def train(opt):
+    from utils.bounded_validation import validate_update_limits, execution_limit, check_next_update, consecutive_skips
+    validate_update_limits(opt)
+    if getattr(opt, "bounded_three_stage_validation", False):
+        from utils.three_stage_preflight import validate_preparation, validate_runtime_options
+        if not getattr(opt, "three_stage_preparation_config", None):
+            raise ValueError("bounded validation requires its audited preparation configuration")
+        preparation_config = json.loads(Path(opt.three_stage_preparation_config).read_text())
+        validate_runtime_options(opt, preparation_config)
+        validate_preparation(preparation_config)
     set_seed(opt.seed)
+    audit_cache = None
+    if getattr(opt, "preparation_audit_cache", None):
+        from utils.preparation_audit_cache import load_preparation_audit_cache
+        audit_cache = load_preparation_audit_cache(opt.preparation_audit_cache)
+        audit_cache.check_all()
     from utils.optical_flow_config import OpticalFlowConfig
     flow_config = OpticalFlowConfig(**{name: getattr(opt, name, field.default)
         for name, field in OpticalFlowConfig.__dataclass_fields__.items()})
@@ -876,7 +944,7 @@ def train(opt):
     slot_reader = None
     if slot_config.enabled:
         from utils.slot_routing import load_slot_supervision
-        slot_reader = load_slot_supervision(opt.slot_supervision_dir)
+        slot_reader = load_slot_supervision(opt.slot_supervision_dir, audit_cache=audit_cache)
     if getattr(opt, "resume_from_checkpoint", None) and opt.training_stage == "stage3_joint":
         opt.action_expert_name_or_path = opt.resume_from_checkpoint
 
@@ -889,6 +957,7 @@ def train(opt):
     accelerator = Accelerator(
         gradient_accumulation_steps=opt.gradient_accumulation_steps,
         dataloader_config=DataLoaderConfiguration(even_batches=False),
+        step_scheduler_with_optimizer=not getattr(opt, "component_optimizer_groups", False),
     )
     accelerator.print(opt)
 
@@ -967,6 +1036,9 @@ def train(opt):
         aux_dataset_config=getattr(opt, "aux_dataset_config", None),
     )
     resolved_dataset_manifest = concat_dataset.resolved_dataset_manifest
+    if getattr(opt, "fast_resume_data_skip", False):
+        from utils.load_training_dataset import validate_fast_resume_datasets
+        validate_fast_resume_datasets(concat_dataset)
     seen_tracker = DatasetSeenTracker(
         concat_dataset,
         accelerator,
@@ -999,7 +1071,7 @@ def train(opt):
         batch_size_per_device=opt.per_device_train_batch_size,
         num_processes=accelerator.num_processes,
         num_workers=dataloader_num_workers,
-        prefetch_factor=3,
+        prefetch_factor=getattr(opt, "prefetch_factor", 3),
         seed=opt.seed,
     )
     epoch_sampler = dataloader.batch_sampler
@@ -1137,6 +1209,7 @@ def train(opt):
         beta1=opt.adam_beta1,
         beta2=opt.adam_beta2,
         epsilon=opt.adam_epsilon,
+        component_groups=getattr(opt, "component_optimizer_groups", False),
     )
     '''single lr (end)'''
     
@@ -1145,8 +1218,9 @@ def train(opt):
         epoch_optimizer_steps, opt.max_train_steps
     )
     warmup_steps = calculate_warmup_steps(
-        num_total_batches, accelerator.num_processes, opt.warmup_ratio
+        num_total_batches, 1 if getattr(opt, "component_optimizer_groups", False) else accelerator.num_processes, opt.warmup_ratio
     )
+    update_limit = execution_limit(opt, num_total_batches)
 
     wandb_logger = WandbTrainingLogger(
         accelerator,
@@ -1163,14 +1237,21 @@ def train(opt):
         retry_max_steps=opt.wandb_retry_max_steps,
         finish_max_attempts=opt.wandb_finish_max_attempts,
         finish_timeout_seconds=opt.wandb_finish_timeout_seconds,
+        batch_metric_reductions=getattr(opt, "batch_metric_reductions", False),
         config={
             **vars(opt),
             "global_batch_size": total_batch_size,
             "num_processes": accelerator.num_processes,
             "num_total_steps": num_total_batches,
-            "warmup_steps": warmup_steps // accelerator.num_processes,
+            "warmup_steps": warmup_steps // (1 if getattr(opt, "component_optimizer_groups", False) else accelerator.num_processes),
         },
     )
+    if (getattr(opt, "bounded_three_stage_validation", False) or
+            getattr(opt, "verify_three_stage_initialization", False)) and accelerator.is_main_process:
+        run = wandb_logger.run
+        with (Path(opt.output_ckpt_dir) / "wandb_identity.json").open("x") as stream:
+            json.dump({"project": opt.wandb_project, "group": opt.wandb_group,
+                "run_name": opt.wandb_run_name, "run_id": run.id, "url": run.url}, stream, indent=2)
     accelerator.wait_for_everyone()
 
     if opt.lr_scheduler == "cosine":
@@ -1178,7 +1259,7 @@ def train(opt):
         lr_scheduler = get_cosine_with_min_lr_schedule_with_warmup_lr_rate(
             optimizer = optimizer,
             num_warmup_steps = warmup_steps,
-            num_training_steps = num_total_batches * accelerator.num_processes,
+            num_training_steps = num_total_batches * (1 if getattr(opt, "component_optimizer_groups", False) else accelerator.num_processes),
             min_lr_rate = opt.min_lr_rate
         )
     elif opt.lr_scheduler == "constant":
@@ -1276,9 +1357,25 @@ def train(opt):
 
         accelerator.print("resumed lr scheduler state dict:", lr_scheduler.state_dict())
 
+    if getattr(opt, "component_optimizer_groups", False):
+        from utils.component_updates import attach_component_guard
+        attach_component_guard(model, optimizer, lr_scheduler, accelerator, diagnostics=opt.log_training_diagnostics,
+            diagnostics_directory=opt.output_ckpt_dir if getattr(opt, "bounded_three_stage_validation", False) else None,
+            diagnostics_mode=getattr(opt, "component_update_diagnostics", None))
+    if (getattr(opt, "bounded_three_stage_validation", False) or
+            getattr(opt, "verify_three_stage_initialization", False)):
+        from utils.three_stage_sources import verify_initialization, verify_checkpoint_serialization
+        bare = accelerator.unwrap_model(model)
+        bare.validation_seen_tracker = seen_tracker
+        sources = verify_initialization(bare, opt)
+        if accelerator.is_main_process:
+            with (Path(opt.output_ckpt_dir) / "component_sources_verified.json").open("x") as stream:
+                json.dump(sources, stream, indent=2, sort_keys=True)
+            verify_checkpoint_serialization(bare, opt)
     accelerator.wait_for_everyone()
     st = time.time()
-    reached_max_train_steps = global_completed_steps >= num_total_batches
+    reached_max_train_steps = global_completed_steps >= update_limit
+    skipped_windows = 0
     if reached_max_train_steps:
         accelerator.print(
             f"Training is already complete at step {global_completed_steps}; "
@@ -1300,8 +1397,17 @@ def train(opt):
 
         accelerator.print(f"{epoch=}")
 
+        epoch_dataloader, first_epoch_batch_idx = dataloader, 0
+        if (opt.resume_training and epoch == resume_epoch and
+                getattr(opt, "fast_resume_data_skip", False)):
+            from utils.load_training_dataset import resume_dataloader_at_batch
+            epoch_dataloader = resume_dataloader_at_batch(dataloader, epoch_sampler,
+                epoch=epoch, batch_idx=resume_batch_idx)
+            first_epoch_batch_idx = resume_batch_idx
+            accelerator.print(f"resume data indices: epoch={epoch}, batch_idx={resume_batch_idx}; historical dataset reads=0")
+
         def resumed_batches():
-            for batch_idx, batch in enumerate(dataloader):
+            for batch_idx, batch in enumerate(epoch_dataloader, start=first_epoch_batch_idx):
                 if opt.resume_training and should_skip_resumed_batch(
                     epoch=epoch,
                     batch_idx=batch_idx,
@@ -1312,15 +1418,27 @@ def train(opt):
                     continue
                 yield batch_idx, batch
 
-        for indexed_window in iter_optimizer_step_windows(
-            resumed_batches(), accelerator.gradient_accumulation_steps
-        ):
+        window_iterator = iter(iter_optimizer_step_windows(resumed_batches(), accelerator.gradient_accumulation_steps))
+        for indexed_window in window_iterator:
+            check_next_update(global_completed_steps, update_limit)
             first_batch_idx, first_batch = indexed_window[0]
             unwrapped = accelerator.unwrap_model(model) if getattr(opt, "training_stage", None) else None
             if getattr(unwrapped, "pending_resume_rng", None) is not None:
                 from utils.training_checkpoint import restore_rng_state
                 restore_rng_state(unwrapped.pending_resume_rng)
                 unwrapped.pending_resume_rng = None
+                if getattr(opt, "verify_resume_state", False):
+                    from utils.validation_resume import verify_saved_training_state
+                    evidence = verify_saved_training_state(model, lr_scheduler, accelerator, opt.vlm_name_or_path)
+                    evidence_path = Path(opt.output_ckpt_dir) / f"saved_state_verified_rank{accelerator.process_index}.json"
+                    with evidence_path.open("x") as stream:
+                        json.dump(evidence, stream, sort_keys=True)
+                if getattr(opt, "bounded_three_stage_validation", False):
+                    from utils.validation_resume import verify_next_window_evidence
+                    evidence = verify_next_window_evidence(model, lr_scheduler, accelerator, indexed_window, opt)
+                    evidence_path = Path(opt.output_ckpt_dir) / f"resume_verified_rank{accelerator.process_index}.json"
+                    with evidence_path.open("x") as stream:
+                        json.dump(evidence, stream, sort_keys=True)
             seen_tracker.update([batch for _, batch in indexed_window])
             if accelerator.is_main_process and first_batch_idx == 0 and epoch == 0:
                 integrity_check(first_batch, model.backbone.processor)
@@ -1346,10 +1464,13 @@ def train(opt):
                 optical_flow_config=flow_config,
                 training_stage=getattr(opt, "training_stage", None),
                 slot_config=slot_config,
+                batch_metric_reductions=getattr(opt, "batch_metric_reductions", False),
             )
             if unwrapped is not None:
                 unwrapped.training_data_cursor = {"epoch": epoch, "batch_idx": indexed_window[-1][0] + 1}
             global_completed_steps = advance_global_step(global_completed_steps, output_metrics, accelerator)
+            skipped_windows = consecutive_skips(skipped_windows, output_metrics["optimizer_update_applied"],
+                getattr(opt, "max_consecutive_skipped_windows", None))
             if output_metrics["optimizer_update_skipped"]:
                 reason = output_metrics["optimizer_skip_reason"]
                 if unwrapped is not None and reason == "no_supervision":
@@ -1361,7 +1482,7 @@ def train(opt):
                     mean_metrics={f"train/{key}": value for key, value in output_metrics.items()}, scalar_metrics={})
                 if accelerator.is_main_process and metrics_log is not None:
                     metrics_log.write(json.dumps({"global_step": global_completed_steps,
-                        **json_scalar_metrics(output_metrics)}) + "\n")
+                        **json_scalar_metrics(output_metrics, batch_tensors=getattr(opt, "batch_metric_reductions", False))}) + "\n")
                 continue
             if flow_config.enabled:
                 output_metrics["flow_skipped_batches"] = torch.tensor(getattr(unwrapped, "skipped_flow_batches", 0), device=accelerator.device)
@@ -1383,7 +1504,7 @@ def train(opt):
                     next_global_step,
                 )
 
-            reached_max_train_steps = global_completed_steps >= num_total_batches
+            reached_max_train_steps = global_completed_steps >= update_limit
 
             do_save = global_completed_steps > 0 and (
                 global_completed_steps % opt.save_step_interval == 0
@@ -1417,21 +1538,16 @@ def train(opt):
                 or reached_max_train_steps
             )
             if do_log:
+                local_metrics = (json_scalar_metrics(output_metrics, batch_tensors=True)
+                    if accelerator.is_main_process and getattr(opt, "batch_metric_reductions", False) else None)
                 if accelerator.is_main_process and writer is not None:
                     writer.add_scalar('learning-rate', lr_scheduler.get_last_lr()[0], global_completed_steps)
                     if global_grad_norm is not None:
                         writer.add_scalar('grad-norm', global_grad_norm, global_completed_steps)
                     writer.add_scalar('training progress', training_progress, global_completed_steps)
 
-                    for name, value in output_metrics.items():
-                        if isinstance(value, str):
-                            writer.add_text('train-' + name, value, global_completed_steps)
-                            continue
-                        writer.add_scalar(
-                            'train-{}'.format(tensorboard_loss_metric_name(name)),
-                            tensorboard_loss_value(value),
-                            global_completed_steps,
-                        )
+                    write_tensorboard_training_metrics(writer, output_metrics, global_completed_steps,
+                                                       local_scalars=local_metrics)
 
                 mean_metrics = {
                     f"train/{name}": value for name, value in output_metrics.items()
@@ -1455,7 +1571,7 @@ def train(opt):
                         "step": global_completed_steps,
                         "epoch": epoch,
                         "learning_rate": lr_scheduler.get_last_lr()[0],
-                        **json_scalar_metrics(output_metrics),
+                        **(local_metrics if local_metrics is not None else json_scalar_metrics(output_metrics)),
                         **wandb_diagnostics,
                     }
                     if writer is not None:
@@ -1466,12 +1582,17 @@ def train(opt):
                     metrics_log.write(line + "\n")
 
             if reached_max_train_steps:
+                if getattr(opt, "bounded_three_stage_validation", False) and global_completed_steps == 50:
+                    from utils.validation_resume import save_next_window_evidence
+                    following = next(window_iterator)
+                    save_next_window_evidence(model, lr_scheduler, accelerator, following, opt,
+                        Path(opt.output_ckpt_dir) / "latest-model-optimizer-lr")
                 break
 
         if reached_max_train_steps:
             accelerator.wait_for_everyone()
             accelerator.print(
-                f"Reached effective max training steps: {num_total_batches}"
+                f"Reached successful optimizer update limit: {update_limit} (scheduler length {num_total_batches})"
             )
             break
         

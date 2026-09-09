@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "preparation_config": "/opt/data/private/lq/ZR-0/configs/three_stage_validation_20260908.json",
+  "experiment": "three_stage_formal_20260909",
+  "output_root": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260909/speed_resume_1000",
+  "wandb_project": "zr0-three-stage-formal",
+  "stage_updates": [10000, 5000, 150000],
+  "stage1_resume_from_checkpoint": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260909/stage1_ar/latest-model-optimizer-lr",
+  "authorization": "User requested the original run stop after a complete step-1000 checkpoint, performance repair without changing training logic, then same-stage resume toward the authorized 10000/5000/150000 budgets."
+}

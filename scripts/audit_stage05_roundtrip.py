@@ -66,17 +66,17 @@ def _action_columns(kind: str) -> list[str]:
     return common + ["observation.state", "action", "action.valid"]
 
 
-def _production_adapter(kind: str) -> Stage05MixedPretrainingDataset:
+def _production_adapter(kind: str, horizon=32) -> Stage05MixedPretrainingDataset:
     adapter = object.__new__(Stage05MixedPretrainingDataset)
     adapter.kind = kind
-    adapter.action_horizon = 32
+    adapter.action_horizon = horizon
     adapter._canonical_cache = OrderedDict()
     return adapter
 
 
-def _eligible_bases(state_valid: np.ndarray, action_valid: np.ndarray) -> np.ndarray:
+def _eligible_bases(state_valid: np.ndarray, action_valid: np.ndarray, horizon=32) -> np.ndarray:
     future_valid = np.convolve(
-        action_valid[::-1].astype(np.int16), np.ones(32, dtype=np.int16), mode="full"
+        action_valid[::-1].astype(np.int16), np.ones(horizon, dtype=np.int16), mode="full"
     )[: len(action_valid)][::-1]
     return np.flatnonzero(state_valid & (future_valid > 0))
 
@@ -113,7 +113,7 @@ def _stratified_bases(actions, action_valid, eligible, q01, q99) -> list[int]:
     return sorted(base for base in bases if base in eligible_set)
 
 
-def _audit_dataset(name, root, kind, sidecar, episodes_per_dataset, full_rh20t):
+def _audit_dataset(name, root, kind, sidecar, episodes_per_dataset, full_rh20t, horizon=32):
     manifest = load_stage05_sidecar(sidecar, verify_source=True)
     stats_payload = load_stage05_stats(
         sidecar / "stats.json", expected_stats_key=f"stage05_{name}"
@@ -147,7 +147,7 @@ def _audit_dataset(name, root, kind, sidecar, episodes_per_dataset, full_rh20t):
         episode = int(record["episode_index"])
         by_file.setdefault(_data_path(root, source_metadata[episode]), []).append(record)
 
-    adapter = _production_adapter(kind)
+    adapter = _production_adapter(kind, horizon)
     accumulator = RoundTripAccumulator()
     audited_chunks = 0
     ordered_files = sorted(by_file.items(), key=lambda item: str(item[0]))
@@ -168,13 +168,13 @@ def _audit_dataset(name, root, kind, sidecar, episodes_per_dataset, full_rh20t):
             # This production method is the canonicalization source used by training.
             adapter._canonical_chunk(episode, rows, 0)
             states, actions, state_valid, action_valid = adapter._canonical_cache[episode]
-            eligible = _eligible_bases(state_valid, action_valid)
+            eligible = _eligible_bases(state_valid, action_valid, horizon)
             if not len(eligible):
                 raise ValueError(f"{name} episode {episode} has no production-eligible base")
             if full:
                 referenced = np.convolve(
                     np.isin(np.arange(len(rows)), eligible).astype(np.int16),
-                    np.ones(32, dtype=np.int16),
+                    np.ones(horizon, dtype=np.int16),
                     mode="full",
                 )[: len(rows)] > 0
                 selected_steps = np.flatnonzero(action_valid & referenced)
@@ -193,7 +193,7 @@ def _audit_dataset(name, root, kind, sidecar, episodes_per_dataset, full_rh20t):
             )
             for base in bases:
                 chunk = adapter._canonical_chunk(episode, rows, base)
-                raw_indices = base + np.arange(32, dtype=np.int64)
+                raw_indices = base + np.arange(horizon, dtype=np.int64)
                 source_indices = np.minimum(raw_indices, len(rows) - 1)
                 valid = chunk.temporal_mask[:, None] & chunk.dimension_mask[None, :]
                 accumulator.update(
@@ -238,7 +238,7 @@ def _audit_dataset(name, root, kind, sidecar, episodes_per_dataset, full_rh20t):
         "sidecar_content_hash": manifest["content_hash"],
         "stats_content_hash": stats_payload["content_hash"],
         "sampling": {
-            "mode": "full_valid_action_steps" if full else "deterministic_stratified_h32_chunks",
+            "mode": "full_valid_action_steps" if full else f"deterministic_stratified_h{horizon}_chunks",
             "eligible_episode_count": len(episode_records),
             "sampled_episode_count": len(selected),
             "audited_chunk_count": audited_chunks,

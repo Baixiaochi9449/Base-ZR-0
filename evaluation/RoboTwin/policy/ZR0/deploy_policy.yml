@@ -1,4 +1,4 @@
-# Basic experiment configuration (keep unchanged)
+# Single-task template. Full suite: configs/robotwin_eval_50x2x20.json.
 policy_name: ZR0
 task_name: adjust_bottle
 #beat_block_hammer
@@ -10,11 +10,12 @@ task_config: demo_randomized
 #demo_randomized
 
 max_episode_steps: 400
-n_episodes: 100
+n_episodes: 20
 n_action_steps: 16
 
 
-ckpt_setting: demo_clean
+# Result label only; task_config selects the scene.
+ckpt_setting: zr0_local_stats_e20
 
 seed: 0
 instruction_type: unseen

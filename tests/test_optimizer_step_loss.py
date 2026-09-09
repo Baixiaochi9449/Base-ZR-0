@@ -170,3 +170,14 @@ def test_joint_all_vqa_window_has_zero_fm_and_no_fm_parameter_update(comparison_
     assert result["metrics"]["flow_matching_loss"] == 0.0
     assert result["fm_parameter"] == 0.5
     assert result["ar_parameter"] != 0.5
+
+
+@pytest.mark.parametrize("distributed,scenario", ((False, "joint_all_vqa"), (True, "standard")))
+def test_batched_metric_reductions_preserve_production_updates_exactly(distributed, scenario):
+    arguments = ["--loss-type", "vlm_and_action", "--gas", "2", "--scenario", scenario]
+    if distributed:
+        arguments.append("--distributed")
+    processes = 2 if distributed else 1
+    scalar = _run_worker(*arguments, processes=processes)
+    batched = _run_worker(*arguments, "--batch-metric-reductions", processes=processes)
+    assert batched == scalar

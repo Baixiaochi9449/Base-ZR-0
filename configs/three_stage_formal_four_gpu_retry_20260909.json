@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "enabled": true,
+  "formal_config": "/opt/data/private/lq/ZR-0/configs/three_stage_formal_four_gpu_resume_20260909.json",
+  "max_retries_per_stage": 3,
+  "retry_delays_seconds": [60, 120, 240],
+  "poll_seconds": 30,
+  "preserve_complete_checkpoints": true,
+  "authorization": "User authorized automatic retries and renewed continuation after terminating the residual Stage 1 workers. Retain the original step-1000 source and apply the existing retry policy without changing the final stage budgets or tested training runtime."
+}

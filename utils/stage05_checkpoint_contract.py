@@ -193,6 +193,36 @@ def is_stage05_four_dataset_manifest(
     )
 
 
+def validate_action_expert_config_provenance(checkpoint_directory, metadata):
+    """Validate an explicit-stage runtime config against its original source."""
+    from utils.action_expert_config import load_action_expert_config
+
+    provenance = metadata.get("action_expert_config_provenance")
+    if provenance is None:
+        return None
+    if not isinstance(provenance, dict) or provenance.get("version") != 1:
+        raise ValueError("Action Expert config provenance is invalid")
+    if provenance.get("content_hash") != _canonical_json_hash(_without_content_hash(provenance)):
+        raise ValueError("Action Expert config provenance hash mismatch")
+    if provenance.get("source_file") != "action_expert_source_config.json":
+        raise ValueError("Action Expert source config filename is invalid")
+    checkpoint = Path(checkpoint_directory)
+    source_path = checkpoint / provenance["source_file"]
+    runtime_path = checkpoint / "action_expert_config.json"
+    if _sha256_bytes(source_path.read_bytes()) != provenance.get("source_raw_sha256"):
+        raise ValueError("Action Expert original source config hash mismatch")
+    if _sha256_bytes(runtime_path.read_bytes()) != provenance.get("runtime_raw_sha256"):
+        raise ValueError("Action Expert runtime config provenance mismatch")
+    runtime = load_action_expert_config(runtime_path)
+    source = load_action_expert_config(source_path, action_horizon_override=runtime.config.action_horizon)
+    if source.parsed_sha256 != runtime.parsed_sha256:
+        raise ValueError("Action Expert source/runtime configs differ beyond the horizon")
+    if (provenance.get("source_action_horizon") != source.source_action_horizon
+            or provenance.get("runtime_action_horizon") != runtime.config.action_horizon):
+        raise ValueError("Action Expert source/runtime horizon provenance mismatch")
+    return provenance
+
+
 def build_stage05_ar_joint_contract(
     *,
     checkpoint_directory: Path | str,
@@ -312,6 +342,7 @@ def validate_stage05_joint_warm_start(
     checkpoint = Path(checkpoint_directory).resolve()
     metadata_path = checkpoint / "zr0_checkpoint_metadata.json"
     metadata = _read_json_object(metadata_path, "checkpoint metadata")
+    validate_action_expert_config_provenance(checkpoint, metadata)
     if metadata.get("version") != STAGE05_CHECKPOINT_METADATA_VERSION:
         raise ValueError(
             "checkpoint is not a compatible Stage05 AR-only checkpoint: "
@@ -489,6 +520,7 @@ def _validate_contract_file_and_config(
     require_stage05: bool,
 ) -> tuple[dict[str, Any], Any]:
     """Validate the shared Expert contract used by resume and fine-tune loads."""
+    validate_action_expert_config_provenance(checkpoint, metadata)
     from utils.action_expert_config import (
         architecture_config_hash,
         load_action_expert_config,
@@ -624,6 +656,7 @@ def validate_generic_action_expert_contract(
 
     checkpoint = Path(checkpoint_directory).resolve()
     metadata = _read_json_object(checkpoint / CHECKPOINT_METADATA_NAME, "checkpoint metadata")
+    provenance = validate_action_expert_config_provenance(checkpoint, metadata)
     if metadata.get("version") != STAGE05_CHECKPOINT_METADATA_VERSION:
         raise ValueError("generic Action Expert checkpoint metadata version mismatch")
     kind = metadata.get("checkpoint_kind")
@@ -666,6 +699,8 @@ def validate_generic_action_expert_contract(
         raise ValueError("Action Expert runtime contract horizon is missing")
     target_horizon = runtime.get("target_action_horizon", runtime.get("action_horizon"))
     source_horizon = runtime.get("source_action_horizon", target_horizon)
+    if provenance is not None and source_horizon != provenance["source_action_horizon"]:
+        raise ValueError("Action Expert runtime source horizon disagrees with provenance")
     for label, value in (("source", source_horizon), ("target", target_horizon)):
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"Action Expert runtime {label} horizon is invalid")
@@ -1024,6 +1059,7 @@ def validate_stage05_checkpoint_for_purpose(
     if kind is None and (checkpoint / "action_expert.safetensors").is_file():
         kind = "legacy_full"
     stage05_identity = _checkpoint_has_stage05_identity(checkpoint, metadata)
+    provenance = validate_action_expert_config_provenance(checkpoint, metadata)
     stage05_contract = metadata.get(STAGE05_AR_JOINT_CONTRACT_KEY)
     if stage05_identity and not isinstance(stage05_contract, dict):
         raise ValueError(
@@ -1093,7 +1129,7 @@ def validate_stage05_checkpoint_for_purpose(
                 metadata["action_expert_contract"],
                 generic,
                 expected_runtime_purpose=STAGE05_JOINT_RESUME,
-                expected_source_horizon=checkpoint_horizon,
+                expected_source_horizon=(provenance["source_action_horizon"] if provenance else checkpoint_horizon),
             )
         if external_config_path is not None:
             external = load_action_expert_config(
@@ -1161,7 +1197,7 @@ def validate_stage05_checkpoint_for_purpose(
                     metadata["action_expert_contract"],
                     generic,
                     expected_runtime_purpose=STAGE05_JOINT_RESUME,
-                    expected_source_horizon=source.config.action_horizon,
+                    expected_source_horizon=(provenance["source_action_horizon"] if provenance else source.config.action_horizon),
                 )
             else:
                 validate_action_expert_weights(
@@ -1249,7 +1285,7 @@ def validate_stage05_checkpoint_for_purpose(
                 generic,
                 generic_resolved,
                 expected_runtime_purpose=STAGE05_JOINT_RESUME,
-                expected_source_horizon=resolved.config.action_horizon,
+                expected_source_horizon=(provenance["source_action_horizon"] if provenance else resolved.config.action_horizon),
             )
         return resolved
     if isinstance(metadata.get("action_expert_contract"), dict):

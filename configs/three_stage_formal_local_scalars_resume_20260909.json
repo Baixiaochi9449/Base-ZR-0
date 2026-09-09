@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "preparation_config": "/opt/data/private/lq/ZR-0/configs/three_stage_validation_20260908.json",
+  "experiment": "three_stage_formal_20260909",
+  "output_root": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260909/speed_resume_local_scalars_3000",
+  "wandb_project": "zr0-three-stage-formal",
+  "stage_updates": [10000, 5000, 150000],
+  "stage1_resume_from_checkpoint": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260909/speed_resume_batched_2000/stage1_ar/latest-model-optimizer-lr",
+  "authorization": "Continue the user-authorized four-GPU throughput repair and formal training. After complete update 3000, activate tested batching of local scalar transfers and TensorBoard scalar events under the existing metric switch. Preserve every logged metric and its frequency, training computations, data order, statistics, required online W&B, prior checkpoints and final 10000/5000/150000 stage budgets."
+}

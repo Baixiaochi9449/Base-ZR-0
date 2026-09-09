@@ -1,5 +1,84 @@
 # Implementation Reference
 
+## Formal Automatic Retry Supervision
+
+- Activated: watcher PID 4137985 attached to original supervisor 4124301 at 2026-09-09 01:49:37 +08:00; original training PIDs remain unchanged. Stage 1 subsequently reached 64 successful updates, loss 3.203702926635742, online W&B with no backlog. Retry tests passed 13/13 in 6.51 seconds; all eight existing formal cases passed in the earlier combined run. CPU-only inspection and actual resume-command parsing passed for all three real validation step-100 checkpoint layouts with zero CUDA initialization/optimizer updates. No active-run fault was injected. Details: `outputs/three_stage_formal_20260909/retry_activation_verified.json`.
+
+- Date: 2026-09-09. The user explicitly authorized automatic retry after formal training failures, superseding the earlier no-retry execution policy. Existing Stage 1 remains running; no healthy training process is restarted.
+- Source and scope: new `scripts/watch_three_stage_formal.py` owns CPU-only live-process observation, complete checkpoint preservation/selection and bounded retry lifecycle. It reuses `scripts/run_three_stage_formal.py::{load_plan,record,write_json,verify_finished_stage}`, the production CLI/restore path, `utils/gpu_resource_gate.py::wait_for_gpus`, checkpoint provenance/Flow validators and the unchanged saved preparation. `verify_finished_stage` now accepts optional `start_step=0` and `checkpoint=None` for a resumed segment; default behavior remains unchanged. No model, trainer, optimizer, dataset or normalization implementation changes.
+- Switch/defaults: explicit `--mode watch` plus enabled `configs/three_stage_formal_retry_20260909.json`; the default mode is readiness checking only. Current policy permits three retries per failed stage with 60/120/240-second delays and 30-second observation, exclusive watcher lock, PID/start-time identity checks, operator-stop handling and unchanged UUID gate. Runtime identity drift stops recovery without automatic source re-audit.
+- Dataflow: live supervisor -> preserve stable complete checkpoints -> on unexpected failure choose newest complete same-stage state -> existing production resume in a fresh attempt directory/online W&B run -> validate remaining logical updates -> continue remaining stages. Without a usable checkpoint, restart only the failed stage from its original source. Stage 3 fresh initialization keeps Expert base-only; same-stage resume restores the saved Expert. Logical budgets stay 10k/5k/150k; discarded logged work is separate, unlogged final updates remain unknown. Inactive Head native counters may lag the global scheduler. ZeRO-2 checkpoint padding is validated against saved `group_paddings`, not treated as a shape mismatch.
+- Artifacts: independent full checkpoint copies in `recovery_checkpoints`, immutable failed logs/checkpoints, per-attempt `experiment.md` and expanded commands, `retry_watch_started.json`, `retry_watch.log`, existing events and `formal_recovered_summary.json`. CPU deserialization suppresses optional Triton import only in the watcher; subprocess exec restores the original training runtime. No GPU diagnostic update or deliberate active-run failure is required.
+- Verification: `tests/test_three_stage_formal_retry.py` exercises command/data isolation, inactive/padded Adam states, partial saves, copy races, recovery fallback, PID reuse, healthy-run preservation, operator interruption, retry limits and resumed counting. Existing formal tests retain default compatibility. Read-only inspection of real completed validation checkpoints additionally checks the three production artifact layouts; these checkpoints are never selected as formal retry sources. Runtime code identities and source audit remain unchanged; no staging/commit.
+
+## Authorized Three-stage Formal Training
+
+- Formal launch confirmed at 2026-09-09 01:20:50 +08:00: detached supervisor PID 4124301, Stage 1 Accelerate PID 4125082 and four ranks are running. The unchanged UUID gate passed. Stage 1 loaded the sole base, verified all 626 VLM state tensors exactly, initialized Query freshly, and passed actual H50-source/H10-runtime serialization before any update. Three successful updates are confirmed, global batch 128, latest loss 9.114498138427734, no skips or W&B backlog. W&B: `https://wandb.ai/jumbo3r-zhejiang-university/zr0-three-stage-formal/runs/three_stage_formal_20260909-stage1_ar`. Runtime evidence: `outputs/three_stage_formal_20260909/launch_verification.json`; stages 2/3 are queued. The first formal checkpoint is scheduled at Stage 1 update 1000. This is a successful launch, not completed formal training.
+
+- Launch regression result: 29 relevant cases passed, including corrected H50 fixture and actual experiment materialization/gate-failure coverage. The CPU-only first materialization's string/Path helper error was fixed and its partial directory preserved at `outputs/three_stage_formal_20260909_prepare_failed`; it launched no training and consumed zero updates.
+
+- Date: 2026-09-09. The user explicitly authorized fresh formal Stage 1/2/3 training for 10,000/5,000/150,000 successful updates after completed validation. Earlier statements restricting formal schedules to unexecuted templates describe the preceding validation task.
+- Source: adapt `scripts/run_three_stage_validation.py::training_command` to accept optional formal output/W&B identity; reuse the existing production trainer, `utils/gpu_resource_gate.py::wait_for_gpus`, component AdamW protection, checkpoint/resume system and saved preparation. New `scripts/run_three_stage_formal.py` owns only experiment materialization, sequential child lifecycle and stage-completion checks; the older validation launcher remains bounded to 100 updates per stage. Config: `configs/three_stage_formal_20260909.json` references the unchanged preparation config.
+- New CLI switch `verify_three_stage_initialization` defaults false in `utils/cli_options.py`. Formal commands enable it to reuse `utils/three_stage_sources.py::{verify_initialization,verify_checkpoint_serialization}` before any update and persist online W&B identity. `train_vla.py::resolve_action_expert_config` permits only the already validated H50-to-H10 runtime override under this switch; original source bytes/provenance remain preserved. `utils/bounded_validation.py` requires an explicit stage. Disabled legacy behavior is unchanged.
+- Data/model semantics: frozen 2,258,456 Stage 1/2 intersection and 24,059,815 Stage 3 population, approved 108 RH20T Flow exclusions and four independent statistics are reused without payload re-audit. Formal Stage 1 starts from the sole base; Stage 2 starts from formal Stage 1; Stage 3 preserves formal Stage 2 VLM/Query/Slot/Flow and loads only base Expert/codecs. Each stage rebuilds optimizer/scheduler/counters. Weights AR/Slot/Flow/FM remain 1/1/1/5 in Stage 3. Original BF16/ZeRO-2/SDPA, global batch 128, optimizer, diagnostics and inactive-head semantics remain intact.
+- Inputs/outputs: authorized formal config plus immutable preparation -> independent `outputs/three_stage_formal_20260909`, expanded commands/options, required online W&B, 1k/1k/2k model snapshots and full latest optimizer checkpoints. The launcher defaults to preparation only; explicit `--mode run` creates an exclusive marker, verifies saved metadata, gates UUID GPUs before each stage, stops on any failure without retry, and exits after Stage 3. Stage transitions verify exact final counts, scheduler and all four runtime/optimizer partitions. No validation checkpoint is used as formal initialization.
+- Verification: `tests/test_three_stage_formal.py` covers command budgets, loss/source routing, preserved preparation identity, rejected validation/overlapping outputs, original H50 runtime override and complete stage transition states; existing three-stage and component regressions also apply. Runtime results and full design are recorded in `docs/experiments/three_stage_formal_20260909/experiment.md` and its output copies. Source snapshot/statistics are unchanged; runtime code binding is separately archived and updated. No staging or commit under the task-specific instruction.
+
+## Read-only dataset and RoboTwin result audits
+
+- Date: 2026-09-08. Purpose: audit the four requested Stage05 releases and locate the historical GPU 0--3 RoboTwin evaluation on `lq@10.82.1.223:25408`.
+- Files: `docs/audits/four_stage05_datasets_20260908.md`, `docs/audits/robotwin_four_gpu_results_20260908.md`, `docs/audits/audit_evidence_20260908.json`.
+- Source: reuse `utils/stage05_sidecar.py::load_stage05_sidecar` without adaptation for current registry validation; inspect existing `utils/stage05_canonical.py` and `utils/stage05_dataset.py` for data semantics. One-off custom CPU diagnostics use PyArrow, PyAV, Pillow and h5py to turn release metadata, selected samples and remote result records into a JSON evidence snapshot. No external model or training implementation is added.
+- Interface/defaults: documentation and read-only audit output only; no runtime feature switch applies, no model/data/loss/default configuration changes. Inputs are the four explicit release roots and existing remote shard artifacts; outputs are the two reports and compact evidence JSON.
+- Verification: all 7,213 data Parquet footers, 111,617 episode metadata records and 1,053 video headers; 4,348 sampled label/action rows and 36 decoded images; all 3,898,056 RH20T numeric rows; 25,424 Flow manifest references and H5 sizes. Existing AR sidecars pass production loading; all four configured Joint sidecars fail with stale generator identities. DROID Flow covers 9,465 episodes and requires source-ID remapping.
+- Remote outcome: four completed adjust_bottle/demo_randomized shards, each 0/25, aggregate 0/100. Result SHA256 values match manifests; all 100 episodes have 400 completed finite actions, and 100 video files exist. The reports preserve reconstructed-normalization and renderer limitations.
+- Limits: no full image/Flow payload scan, new full token/Slot semantic audit, model forward, training, evaluation rerun or automatic data repair. Historical reports remain dated records; these reports distinguish current checks from historical claims.
+
+## Bounded three-stage integration (saved audit and authorized Flow exclusions)
+
+- Final production result, 2026-09-09 00:34:22 +08:00: r2 completed 100/100/100 successful updates in six separate 50-update processes. All six full ZeRO-2 checkpoints and 12 rank/stage recovery checks passed; diagnostics performed zero optimizer updates. Stage 3 naturally had no Slot supervision at updates 32 and 76: on every rank parameters/moments/second moment/group step/LR stayed exact, other groups and global scheduler advanced, and Slot reactivated at the global LR. Slot ended at group step 98, other Stage 3 groups at 100. All frozen Stage 2 VLM tensors remained exact; Stage 3 inherited its four components and loaded only the 149-tensor base Expert. Final total losses 0.31141552329063416/0.7020365595817566/3.051896333694458; allocated/reserved peaks 35.8486/77.1094, 11.7698/14.4629, 40.4372/77.5684 GiB. Each stage saw 12,800 samples, no duplicates, no global skips or data retries. Full evidence and limitations are in `outputs/three_stage_validation_20260908/validation_results.md`, `flow_exclusion_108/validation_report.json`, and `flow_exclusion_108/validation_runtime_evidence.json`. Failed attempts' 51 Stage 1 updates remain separate expenditure. Audit snapshot and all four independent statistics remain unchanged. Production whole-window Flow absence, global no-supervision, AMP overflow and real epoch-boundary cases were not observed; CPU branch coverage and RH20T full-clipping-frequency limits are distinguished. Formal budgets remain command templates only; no staging/commit/formal launch occurred. All earlier progress/pending statements below are historical and superseded by this final result.
+
+- Production update at 2026-09-08T15:20:41+00:00: replacement r2 Stage 2 also completed 100 updates with full 50/100 ZeRO-2 checkpoints and exact four-rank new-process recovery. Final total/Slot/Flow losses 0.7020365595817566/0.6079928278923035/0.09404373168945312; allocated/reserved peaks 11.76980209350586/14.462890625 GiB; 12,800 samples, no duplicates. An independent complete-key, per-tensor comparison of the Stage 1 and Stage 2 step-100 VLM safetensors found all 625 BF16 stored tensors exactly unchanged. Actual missing Flow samples were retained; both heads remained globally active in every Stage 2 window, which does not establish whole-window inactive-head coverage on production ZeRO-2. Stage 3 has started from Stage 2 with the independent base Expert source. Current validation progress is 100/100/0; failed-attempt expenditure and audit identity are unchanged.
+
+- Current production status at 2026-09-08T15:02:55+00:00: replacement r2 Stage 1 completed 100 real successful updates in separate 0-to-50 and 50-to-100 processes, with both full ZeRO-2 checkpoints preserved under `outputs/three_stage_validation_20260908/validation/stage1_ar`. All four ranks passed exact model/native optimizer/FP32 masters/scheduler/RNG/cursor/sampler/exposure and next-production-window hash comparisons; diagnostic forward passed rtol=1e-3, atol=1e-4 with zero diagnostic updates. Final/minimum loss 0.31141552329063416, peak allocated/reserved GPU memory 35.848602294921875/77.109375 GiB, 12,800 samples and no duplicates. Stage 2 is now starting from Stage 1 step 100. The user authorized autonomous repair and continuation; failed attempts' 51 Stage 1 updates remain separately accounted. This current result supersedes all older pending-permission, no-checkpoint and no-restart statements below. The active runtime binding now includes the logger, attempt identifier and checkpoint-horizon fixes (six files), with all earlier bindings/certificates archived and the source audit unchanged. No staging, commit or formal training occurred.
+
+- Bounded-only checkpoint serialization preflight: after exact component-source verification and before the first optimizer window, `train_vla.py` calls `utils/three_stage_sources.py::verify_checkpoint_serialization` on rank 0. It uses the real `ZR0Model.save_pretrained` in an owned temporary directory, validates stage/config/provenance and AR/Joint load contracts, removes that temporary artifact, and records `checkpoint_serialization_verified.json`. It performs zero optimizer updates and leaves the original training/checkpoint loop unchanged. This reuses the actual production serializer/validators to catch the observed H50/H10 save failure before consuming updates. It is disabled with the existing bounded-validation switch. The three-stage save/load regression also exercises this preflight for each stage.
+
+- Checkpoint horizon serialization repair: replacement attempt r1 completed 50 real Stage 1 updates but failed before writing the optimizer checkpoint because the legacy Stage05 save contract compared source H50 JSON against runtime H10. Adapted `ZR0Model.save_pretrained` for explicit three-stage checkpoints to save the effective runtime config as `action_expert_config.json`, preserve exact original source bytes separately as `action_expert_source_config.json`, and bind both hashes/horizons in self-hashed provenance metadata. `validate_action_expert_config_provenance` in the existing Stage05 contract module validates both artifacts and compares the full parsed config after the existing horizon-only override. Loading/resaving carries original provenance forward. Explicit-stage inherited VLM validation uses that checkpoint's own runtime config and compares it with the requested config; the independently loaded Stage 3 base Expert is not substituted into the inherited checkpoint contract. Generic and Stage05 contracts retain strict runtime/architecture checks and use verified original horizon provenance. Legacy checkpoints without this optional provenance retain the original byte-preserving behavior. New CPU coverage exercises all three stages, H50-to-H10 save/load/resave, cross-stage component preservation, independent Expert origin and corrupt-source rejection. No model/optimizer state from failed r1 can be claimed recovered: only partial model files exist, and all 50 updates remain failed-attempt expenditure. The user authorized repairs and autonomous continuation to complete validation.
+
+- The user explicitly directed autonomous continuation until a complete 100/100/100 validation, followed by a separate formal-training confirmation. The failed Stage 1 attempt's one actual update is retained as failed-attempt expenditure; the replacement validation starts fresh. Adapted `scripts/run_three_stage_validation.py::training_command` with optional `ZR0_VALIDATION_ATTEMPT` (default empty) to suffix only validation W&B run name/ID, so a restarted attempt does not collide with the failed online run. Stage resume uses the same attempt ID; formal templates, output/checkpoint paths, source/data/model/optimizer configuration and the per-attempt 100-update cap are unchanged. Invalid identifiers fail. A focused command test verifies that only those two logging arguments differ and formal commands are unchanged. Original failed artifacts are archived before the replacement launch. No source re-audit or formal training is authorized by this continuation.
+
+- Logger runtime binding is now complete: `flow_exclusion_108/audit_runtime_binding.json` pins the sole changed runtime file, `utils/wandb_training_logger.py`, after the 23-test regression. The active preparation certificate differs only in that hash; its original bytes are archived as `preparation_complete_before_logger_fix.json` (SHA256 `41854504aadefb71e8ce0eb5646b897db591886a02b16882774138c31969a89e`). The immutable audit snapshot retains SHA256 `19e7b8b5ddc213b57d41660524a89b935ce8870c7432498e90d1dbfcb9753b9f`. The existing cache loader accepted the binding, and original/updated certificates compared equal apart from the logger hash. No source re-audit occurred. This supersedes pending-runtime-binding statements below; the one-update budget-exception decision remains pending and no further training has started.
+
+- Latest real validation evidence: the authorized startup retry passed the unchanged UUID gate. Stage 1 then completed one successful update on all four ranks before the Python-float W&B logging bug stopped the process. VLM initialization compared all 626 state tensors exactly; Query/VLM updates and global scheduler 0-to-1 are recorded per rank. Recovered TensorBoard AR/total loss is 8.602523803710938, unclipped gradient norm 569.9274291992188, and max-rank allocated/reserved peaks 31.91877555847168/54.634765625 GiB. Online W&B initialization passed. Actual totals are 1/0/0, with no checkpoint or resume evidence. The logger/component regressions after the fix passed 23 tests in 17.19 seconds. No source re-audit or subsequent production restart occurred. The successful first update cannot be silently removed from the budget; a fresh complete Stage 1 would total 101 and awaits an explicit budget-exception decision. Original audit/certificate remain preserved and a logger-only runtime binding is pending. See `flow_exclusion_108/stage1_first_update_failure.json` and the updated experiment docs for full evidence. Historical 0/0/0 entries below are superseded.
+
+- Production logging compatibility fix: Stage 1 completed one confirmed ZeRO-2 update on all four ranks, then `WandbTrainingLogger.log` failed because component diagnostics contain Python floats/integers while the logger assumed tensors. Adapted the existing logger in `utils/wandb_training_logger.py` to convert numeric metrics with `torch.as_tensor(...).detach()` before the unchanged float32 mean reduction. Tensor metrics retain their previous detached reduction semantics; bool/string routing, required online W&B policy, optimizer, scheduler and model/data computation are unchanged. Disabled W&B still performs no conversions or collectives. No new switch is needed for this input-type bug fix. `tests/test_wandb_training_logger.py` adds mixed tensor/float/int/bool/string coverage for main and non-main ranks, device/dtype conversion and no autograd attachment. Verification outcome is recorded in the experiment documentation. The original sealed source audit is preserved; runtime binding requires a separately recorded logger-only update before another launch.
+
+- The user subsequently explicitly authorized startup retry and continuation. The failed-start marker was archived byte-for-byte as `validation_started_failed_20260908T124130Z.json`; original gate/failure evidence is preserved. The same bounded entrypoint is restarted with unchanged runtime code, sealed audit, training configuration, UUID-query deadline and GPU thresholds. The authorization covers completing 100 successful updates per stage, with no formal training, staging or commit. This supersedes the earlier statement that retry authorization was pending.
+
+- Actual continuation outcome at 2026-09-08 20:41:30 CST: the saved preparation certificate and metadata checks passed, without source re-auditing. The runner created `validation_started.json` but stopped before any training child because the CUDA UUID query subprocess exceeded the existing 5-second deadline (`GPUResourceError` caused by `TimeoutExpired`, 5.651265 seconds elapsed). All GPUs were independently idle at 2 MiB/0%. Later isolated read-only import/driver initialization took 0.178194/0.283585 seconds; the original timeout cause remains unestablished. No runtime code/configuration or gate threshold changed. All task processes exited, with 0/0/0 updates and no checkpoints, W&B or production/resume evidence. No retry, formal training, staging or commit occurred. The failed-start marker and `gpu_gate.jsonl` are retained. The current report is `outputs/three_stage_validation_20260908/flow_exclusion_108/validation_report.json`, with the detailed `validation_launch_failure_20260908T124130Z.json`. This supersedes the launch plan and older resource-blocked outcomes below; another startup needs explicit retry authorization under the user's failure-stop rule.
+
+- Validation continuation on 2026-09-08 at 20:38 CST: the user released four GPUs and requested execution. All four A800 cards were observed at 2 MiB and 0% utilization. The existing bounded runner is invoked with the sealed `flow_exclusion_108` revision, metadata-only audit reuse and the unchanged per-process UUID gate. This supersedes the earlier resource-blocked outcome below. No runtime implementation or training configuration changed. Each stage remains capped at 100 successful updates with a new process after step 50; failures stop without retry. Formal commands remain unexecuted. Actual outcomes are recorded in the experiment document and `validation_events.jsonl`; the task-specific no-staging/no-commit instruction remains in force.
+
+- Date: 2026-09-08. Purpose: implement the authorized full-model Stage 1/2/3 validation, each capped at 100 confirmed optimizer updates, with independent 50-update save/exit and new-process recovery. Formal 10k/5k/150k schedules are command templates only. No automatic staging, commit, formal launch or training retry.
+- Current resolution supersedes the initial blocked outcome below: the user explicitly authorized excluding 108 Flow rows across 12 RH20T episodes. `flow_excluded_frames` is an optional dataset-route map, absent by default. Adapted `flow_contract`/`validate_flow_file` still check original file hashes, source identity, frame/camera metadata and source/destination timestamp alignment; only the approved rows are omitted from the unchanged 20-microsecond FPS interval check. `OpticalFlowReader.read` returns unavailable Flow supervision (reason 5) for those rows, and `eligible_frames` omits them. AR/Slot/FM masks, sample indices, original labels and all four independent state/action statistics remain unchanged. Legacy routes have no exclusions.
+- The connected custom `utils/flow_exclusion_resolution.py::resolve_preparation` consumes the saved failed snapshot, complete RH20T continuation, exact 12-episode/108-row exclusion list and timestamp scan. It verifies the exception rows against source Parquet, completes missing prefix counts and writes a new `flow_exclusion_108` preparation revision. Original source/weight/statistics/Slot/other-Flow SHA256 evidence is reused through metadata checks; the original failed snapshot is retained. The new revision binds updated reader code, routes and exclusion identities. Preparation commands reuse the active revision; training checks saved identities without repeating source audits. This small resolver is new orchestration around existing audit/cache APIs, needed to preserve the immutable failed snapshot while recording the authorized resolution.
+- Resolution verification: 84 CPU regression tests passed, followed by 9 cache tests (overlapping suites). Actual HDF5 tests cover unchanged payload hashes, valid neighboring labels and source-alignment rejection even for excluded rows. All 8,142 RH20T episodes passed the continuation; the corrected complete report covers 3,898,056 rows and 3,735,186 retained nominal-delta rows. Of 108 excluded rows, 32 were nominal and 76 already had non-nominal tail intervals. The production cached reader returned unavailable Flow for all 108 rows, retained 12 normal examples and held at most four HDF5 handles. `flow_exclusion_108/preparation_complete.json` passed; its snapshot has 78,877 file identities and SHA256 `19e7b8b5ddc213b57d41660524a89b935ce8870c7432498e90d1dbfcb9753b9f`. Original indexes and statistics are unchanged. The 60-second UUID GPU gate returned NO-GO because other compute processes occupy all four cards; no validation child started. Actual updates remain 0/0/0, with no real ZeRO-2/full-model/resume evidence or checkpoints. The initial failure records below describe the previous snapshot and are superseded by this completed data resolution.
+- Sources: adapt existing `train_vla.py::{build_adamw_optimizer,run_optimizer_step_window,train}`, CLI, `Stage05MixedPretrainingDataset`, `SlotSupervisionReader`, `audit_slots`, `OpticalFlowReader`, `flow_contract`, `validate_flow_file`, and the existing roundtrip audit. New focused modules `component_updates.py`, `bounded_validation.py`, `frozen_stage_index.py`, `three_stage_sources.py`, `three_stage_preflight.py`, `validation_resume.py` connect those existing production APIs. No external architecture, optimizer, sampler, normalization or loss is reimplemented.
+- Entry/configuration: `configs/three_stage_validation_20260908.json`, `scripts/prepare_three_stage_validation.py`, `scripts/run_three_stage_validation.py`. CPU preparation builds independent full-DROID/four-source H10 sidecars, Slot provenance, frozen indexes, Flow joins, processor and normalization audits. The `sources` phase hashes entire selected data, camera and metadata files with four bounded CPU workers and links them to each episode's original identity, frame count and train split. Source identities and each independent canonical statistic enter the frozen checkpoint contract; source size/mtime/path changes reject startup after the full SHA256 audit. Every source statistic precedes auxiliary filtering. Original data, source manifests/HDF5 numbering, base weights and historical statistics are not overwritten.
+- Switches: `--component_optimizer_groups`, `--bounded_three_stage_validation`, `--three_stage_preparation_config`, `--save_and_exit_after_updates`, `--max_consecutive_skipped_windows`; booleans default off and limits default unset. `--prefetch_factor` retains legacy default 3; the new commands explicitly request 2. The new dataset route's `frozen_stage_index` and optional `flow_episode_map` are absent on legacy routes. `audit_slots(..., allow_unannotated_episodes=False)` is opt-in for full DROID's documented null merge policy. Old Query-off/action-only optimizer grouping and scheduler semantics remain unchanged.
+- Native updates: each trainable component has one AdamW group. Global rank/GAS supervision counts and effective outer/internal coefficients determine activity; numerical zero is valid supervision. Public native pre/post step hooks temporarily remove inactive group gradients at the actual AdamW boundary, including ZeRO-2 FP32 partition steps. Inactive parameters, moments, step and LR are checked unchanged; reactivated groups use the current global scheduled LR. The opt-in global scheduler advances once per successful update. Old schedule scaling is retained off-switch. Per-window component activity, applied status, gradient, parameter/state delta, optimizer step/LR and scheduler position are recorded. CPU native partition simulations are not evidence of a real ZeRO-2 run.
+- Data contract: frozen Stage 1/2 share quality + two-camera + valid-AR + valid-Slot-anchor intersection; Stage 3 is quality + two-camera with AR/Slot/Flow/FM masks. Stage 1 omits Slot parquet columns and auxiliary readers/heads. Stage 3 supplies zero action/state masks where FM is unavailable, without modifying the legacy strict-Joint route. Slot's wrapper rejects further changes to a frozen selection. Full-DROID absent source episodes require declared null merging and null merged labels; existing-but-broken annotation sources are errors. Lazy reader caches remain bounded. Optional Flow remapping joins original source episode IDs while preserving manifest/HDF5 IDs, hashes, FPS, delta, timestamp, camera and unit validation; Arrow episode filtering avoids converting unrelated full-DROID rows to Python.
+- Model/data invariants: sole base `/opt/data/private/lq/models/ZR-0`; base actual config/processor and complete weight/shard keys, shapes and tied embeddings are audited. Base Expert horizon 50 is overridden at runtime to 10 without structural changes. Stage 3 verifies inherited VLM/Query/Slot/Flow and loads only base Expert weights, with exact per-tensor source-to-runtime dtype comparisons before an update. Query partition is 32 total/16 trailing Flow; legacy [C,Q,T,P], mRoPE, DeepStack, RMSNorm and generate rejection remain. Outer Flow weight is 1.0 and Stage 3 weights are AR+Slot+Flow+5*FM.
+- Recovery: reuse complete ZeRO-2 checkpoints and existing cursor/RNG/exposure restoration. New diagnostic fingerprints model/master/optimizer/scheduler/RNG/sampler/exposure, re-reads the next actual production accumulation window and compares all input identities/tensors exactly. Eval forward diagnostics use fixed rtol=1e-3/atol=1e-4, restore RNG/mode and execute no optimizer update. They do not claim uninterrupted-trajectory equivalence or epoch-boundary coverage. Each half-stage writes to a different output directory.
+- Verification so far: initial 156 focused CPU tests pass; a subsequent 119-test integration run also passes (overlapping suites, counts not additive), using `scripts/test_three_stage_cpu.py` to isolate Accelerate's optional DeepSpeed import from driver-free CPU tests. Added regressions cover accumulated momentum, first activity, inactivity, reactivation, same-stage native optimizer/scheduler restore, numerical zero supervision, production AR/FM with missing Slot, frozen-index corruption, Stage 1 label isolation, Stage 3 missing FM, Flow source remapping/timestamps, exact next-window recovery diagnostics, source tensor comparison and command caps. Real ZeRO-2, full-model 100/100/100 updates, exact production recovery and final data counts remain pending. Details and actual failures/results are maintained in `docs/experiments/three_stage_validation_20260908/experiment.md` and its output-directory copy.
+- Saved audit reuse: `utils/preparation_audit_cache.py` adds an explicit `--preparation_audit_cache` option (default unset) and a matching dataset route field. The preparation `archive` phase saves original SHA256 evidence, generated indexes, per-source statistics, code/runtime identities and pass/fail outcomes to an immutable `audit_snapshot.json`. Future starts perform metadata checks (resolved path, size, mtime/ctime, device/inode), not original payload hashes, source inventory, timestamp alignment, Slot source parsing or frozen-index eligibility scans. A changed identity stops; no phase automatically repeats the audit. New cached loaders adapt existing Slot/Flow readers and Stage05 sidecars while retaining bounded handles, actual-sample mask/value checks and exact component/resume comparisons. Legacy routes retain their existing checks.
+- Compatibility: the once-produced Slot indexes retain their original producer hashes, statistics and source alignment. The cached reader consumes those immutable artifacts under the snapshot's separately pinned runtime implementation; it does not rewrite producer identities after the runtime cache adaptation. Changing the actual audit algorithm requires new evidence and is not silently accepted. H32 roundtrip API defaults remain 32; only the explicit H10 audit uses horizon=10. Metadata checks assume original files remain immutable; they are not a fresh cryptographic verification of file contents.
+- Final CPU preparation: all four source/Slot/normalization/processor audits and frozen indexes are saved. Stage 1/2 share 2,258,456 samples; Stage 3 has 24,059,815. DROID, Household and Tabletop Flow audits passed. RH20T Flow stopped: merged episode 491, original episode 558, four tail records have maximum FPS-interval residual 0.000024414062500088818 s against the existing 0.00002 s tolerance. It is a quality-admitted episode; the tolerance, source data and labels remain unchanged. Its failed evidence and uncertified remainder are retained, and the snapshot blocks all training. Actual full-model updates remain 0/0/0; no checkpoints, real ZeRO-2 or production resume results exist yet. Formal 10k/5k/150k commands are saved but were not executed.
+- Cache verification: `tests/test_preparation_audit_cache.py` adds source-payload read prohibitions, cached sidecar and Flow reopening, Slot metadata checks, changed identity rejection, failed snapshot rejection and reuse-without-audit entry tests. The affected 73-test integration suite and two additional blocked/reuse tests pass; Python compilation and diff checks pass. File metadata is not used as a claim of fresh content-hash verification.
+- Final cache closure: `_resolve_stage05_spec` in `utils/dataset_spec.py` also uses the cached sidecar loader. Eight cached production-dataset/cache tests and one runtime-binding scope test pass (overlapping earlier cases). The saved snapshot contains 70,722 file identities; its SHA256 is `da70150707563f23823d8241888ca368883c30d191180d909f24cb146bd9e31b`. The original snapshot remains unchanged. `audit_runtime_binding.json` pins the reviewed DatasetSpec/cache-loader adaptation to that snapshot, permits only its three named adapter files, and cannot change the failed audit status. A metadata-only check of all identities took 74.54 s; `validation_report.json` records the final blocker, provenance paths, test evidence and 0/0/0 updates.
+- Resource release did not remove the data blocker: with all four A800s idle (2 MiB used, 0% utilization), `scripts/run_three_stage_validation.py --mode validate` exited before `validation_started.json` because the saved RH20T Flow audit is blocked. No GPU UUID gate, W&B run, training child, checkpoint or optimizer update was created; the attempt is recorded in `validation_gate_attempt.log` and the experiment report.
+
 ## PyAV decoder ownership and bounded GPU resource gates
 
 - Date: 2026-09-07. Purpose: prevent delayed AV1 decoder-thread release and replace single GPU-utilization snapshots with bounded, recorded availability checks before sequential launches.
@@ -910,3 +989,445 @@
 - Limitations: no automatic retries/resume or guaranteed 4x wall-clock speedup.
   Other workers continue after one worker fails. Statistics equivalence remains
   unverified; actual startup/progress is recorded in the experiment document.
+- Authorized execution on 2026-09-08: after the user released all four GPUs,
+  the prepared parent launched at 13:30:51 +08:00 in tmux `zr0_rt_eval_4gpu`.
+  Each model loaded the requested checkpoint, each health endpoint passed and
+  each simulator's quantitative render check confirmed its assigned PCI device.
+  This reuses the existing code/configuration without new model or evaluation
+  behavior. Launch provenance and actual runtime checks are in the experiment
+  document and ignored output directory; full benchmark results are pending.
+  At 13:36:47 +08:00 all four workers had completed real VLA forward calls
+  and advanced their first policy episodes beyond 280 simulator steps, with
+  no worker exit or fatal startup traceback. The batch continues in tmux.
+
+## RoboTwin remote evaluation migration
+
+- Date: 2026-09-08. Purpose: stop the local evaluation and run the authorized
+  50-task, two-profile, 20-trial matrix on `lq@10.82.1.223:25408`, GPUs 0-3.
+- Source: direct reuse of `scripts/prepare_robotwin_eval_suite.py::prepare_suite`,
+  `scripts/run_robotwin_eval_worker.sh` and the original model/client code.
+  No model, preprocessing, statistics, horizon or training change is retained.
+- Local run stopped by request; partial logs are preserved. Existing workers
+  reject reused outputs and have no episode resume, so the remote run restarts
+  all 2,000 policy trials in a separate output directory.
+- Two initial remote attempts failed before a completed policy inference with
+  `ConnectionClosedError`. There is no evidence of CUDA OOM. The speculative
+  compilation-disable diagnostic did not help and was removed; normal
+  `torch.compile` remains enabled.
+- Remote tmux inherited HTTP/HTTPS proxies. The installed WebSocket library
+  resolved the loopback URL through port 7897; setting both `NO_PROXY` and
+  `no_proxy` to `127.0.0.1,localhost,::1` resolves it directly. This standard
+  environment override is scoped to the new launch; other sessions are unchanged.
+- Validation: proxy resolution checked with the installed `websockets.uri`
+  implementation; actual launch, health, render devices and policy progress are
+  recorded in `docs/experiments/robotwin_eval_50x2x20_20260907/experiment.md`.
+  The final launch started at 14:58:24 +08:00 in remote tmux
+  `zr0_rt_eval_remote_direct_4gpu`. At 15:03:05 every worker had completed
+  multiple real forwards and advanced beyond 49 policy actions, using about
+  12.7 GiB additional VRAM per GPU without OOM or connection failure.
+- Limitations: normalization equivalence to official training remains unverified;
+  no new resume or batching support is introduced.
+
+## RoboTwin legacy checkpoint jitter diagnosis
+
+- Date: 2026-09-08. Purpose: investigate abnormal robot motion in the current
+  remote evaluation using recorded actions and paired offline inference.
+- Files: `scripts/diagnose_robotwin_checkpoint.py`,
+  `docs/experiments/robotwin_jitter_diagnosis_20260908/experiment.md`, and
+  `docs/audits/robotwin_jitter_diagnosis_20260908.md`.
+- Source: repository reuse of `ZR0Model.from_pretrained`,
+  `prepare_qwen_vl_inputs_cpu`, `prepare_action_expert_inputs_cpu`,
+  `custom_collate_fn`, `FlowmatchingActionHead.get_action` and `min_max_denorm`.
+  New diagnostic orchestration reads v3 Parquet/video metadata via PyArrow/PyAV;
+  these inputs are not supported by the production v2 evaluation metadata path.
+- Inputs/outputs: explicit checkpoint, dataset, stats, evaluation log root,
+  episode/seed selection and output directory; emits paired prediction metrics,
+  action arrays and source images. Large generated artifacts remain ignored.
+- Switch/default: standalone script, invoked explicitly; device defaults to CPU.
+  No production hook or new training behavior is installed. Omitting the command
+  has no effect. Temporary norm hooks exist only in the diagnostic process.
+- Design: one VLM pass per sample supplies both the existing normalized features
+  and the original hidden tensor. The same state, quantiles and RNG seed are used
+  for both Action Expert calls. A second pass compares BF16/FP32 denormalization
+  of exactly the same normalized output, without changing model precision.
+- Findings: original features reduce paired joint MAE by 49.87% and mean absolute
+  second difference by 46.72% over 12 observations x 2 seeds. This identifies
+  a legacy conditioning mismatch introduced by commit `166193d`; it does not
+  establish closed-loop success or prove checkpoint statistics equivalence.
+  FP32 denormalization alone has a substantially smaller measured effect.
+- Verification: two independent real-checkpoint GPU diagnostics completed,
+  totaling 72 predictions; all finite, actual three-view 224x224 inputs verified,
+  runtime norm-input equality verified, approximately 5.08 GiB peak allocated.
+  The Action Expert/client/control code was compared with original `b1440d4`.
+- Compatibility/limitations: production behavior and ongoing evaluation are
+  unchanged. Any later fix must preserve normalization for locally trained
+  checkpoints while explicitly selecting original features for the official
+  legacy checkpoint. Corrected closed-loop evaluation remains outstanding.
+
+## Standalone VLM text capability inspection
+
+- Date: 2026-09-08. Purpose: inspect the language capability retained in a local
+  pretrained Qwen3-VL/ZR-0 checkpoint with independent text-only questions.
+- Files: `simple_scripts/vlm_text/inspect_vlm_text.py::{inspect_checkpoint,
+  load_model,generate_answer,run}`, its `README.md`, and
+  `tests/test_vlm_text_inspection.py`.
+- Source: adapt the existing Qwen loading APIs used by
+  `model/qwen_vl_backbone.py::QwenVLBackbone.__init__` and the complete HF
+  checkpoint/processor layout written by `ZR0Model.save_pretrained` in
+  `model/reasoning_vla_model.py`. Direct Transformers model/processor loading
+  avoids instantiating training/query/action modules for this diagnostic.
+- External local reference: `/opt/data/private/lq/FD-ID-FlowVLA/simple_script/
+  vlm_text/inspect_vlm_text.py::generate_plain_chat`, commit
+  `3824d36cdf76bf0a9d537635de92a38f3920e9a3`. Adapt its chat-template inference,
+  prompt-prefix removal and generated-token evidence; no StarVLA dependency.
+- New orchestration: CLI or JSONL questions feed independent processor chat
+  templates, frozen Qwen greedy generation, terminal answers, `result.json`
+  and `experiment.md`. References are review-only and never enter the prompt.
+  Existing VLA forward/generate paths do not implement this independent check.
+- Switch/default: explicit standalone invocation only; inactive when omitted.
+  Default CPU/FP32, four CPU threads, SDPA, seed 42 and 256 new tokens. Optional
+  CUDA uses BF16 when supported; all choices are local to the new process.
+  Greedy decoding explicitly passes `use_model_defaults=False` to prevent
+  Transformers >=4.50 from restoring checkpoint sampling defaults.
+  No training, loss, optimizer, dataset, image, horizon or production changes.
+- Compatibility: full local Qwen3-VL safetensors and processor are required;
+  local-only loading has no remote/base fallback. Adapters, missing shards and
+  incomplete/unexpected VLM parameters fail. DQ generation guards stay intact.
+  No Action Expert/Query/Slot/Flow is loaded or run; vision is unused by text.
+- Outputs: unique new directory outside the checkpoint, default under ignored
+  `outputs/vlm_text`. Records actual inputs/output IDs, EOS versus truncation,
+  generation settings, checkpoint inventory/metadata hashes, runtime and code
+  identities. Completed answers survive later failures; status is explicit.
+- Validation: six focused CPU tests pass, including actual Transformers
+  generation-config resolution against sampling-enabled checkpoint defaults.
+  CLI help works without importing model dependencies; whitespace checks pass.
+  Full local `/opt/data/private/lq/models/ZR-0` loads exactly and completes two
+  CPU/FP32/SDPA questions, recorded in
+  `outputs/vlm_text/zr0_cpu_smoke_20260908_greedy/{result.json,experiment.md}`.
+  The arithmetic answer is incorrect (`1931` instead of `391`); translation
+  produces robot reasoning text and reaches the 32-token limit without EOS.
+  These are observed answers, not a passed language benchmark. The earlier
+  smoke run is marked superseded because checkpoint sampling defaults applied.
+  No GPU inference, training or full robot evaluation was run for this task.
+- Limits: manual inspection, not a scored benchmark or DQ/robot evaluation.
+  Weight inventory is filename/size/mtime evidence, not full content hashing.
+  Only complete Qwen3-VL checkpoints are supported; no unmerged LoRA or `.pt`.
+
+## Formal Stage 1 Throughput Diagnosis Against 65d6a7d
+
+- Date: 2026-09-09. Purpose: explain the approximately 8.27x observed slowdown
+  relative to `65d6a7d8342d15a07eea2177fe3ff3edb1d5ab84` and its retained AR run.
+- Evidence and standalone observer:
+  `outputs/three_stage_formal_20260909/performance_diagnosis_20260909/`.
+  `report.md` records code/configuration differences, metrics, source identities,
+  estimated duration, limitations and the recommended correction.
+- Sources: existing training JSONL, initialization manifests and Git diff;
+  custom observation-only `observe.py` reads four existing `/proc` rank records
+  and `nvidia-smi` metrics into JSONL/JSON. Explicit invocation only; no
+  production integration or additional optimizer update. The existing training
+  logs lack host-memory/continuous-device samples, motivating this observer.
+- Finding: the formal command retains `log_training_diagnostics=true`, which
+  `attach_component_guard` uses to enable complete active-component before/after
+  CPU snapshots and FP64 parameter/moment delta calculations every window.
+  Logging was already every step in the historical run; the new guard expands
+  that flag's cost. Changing only `logging_steps` does not disable guard work.
+- Verification: old/current metric batch counts are 128 with GAS=2; existing
+  `module_gradient_norms` AST and Qwen backbone source are unchanged. A 120-second
+  read-only observation completed with stable rank identities and mean GPU
+  utilization 17-24%. Function-level attachment was denied by ptrace policy;
+  no controlled training A/B timing was run, so exact cost attribution and
+  restored throughput are not claimed.
+- Compatibility: no trainer/model/configuration, data/statistics or restart
+  behavior changed. The expensive formal diagnostic mode is still active;
+  removing it while retaining inactive-Head protection is recommended, not
+  implemented by this diagnostic task. No source audit, staging or commit.
+
+## Opt-In Inactive-Only Component Diagnostics
+
+- Date: 2026-09-09. Purpose: remove complete active-VLM CPU parameter/Adam-state
+  copies from formal training while preserving the native update contract.
+- Existing implementation adapted: `utils/component_updates.py`,
+  `ComponentUpdateGuard` and `attach_component_guard`; integrated by
+  `train_vla.py`, `utils/cli_options.py` and the shared three-stage command builder.
+- Switch: `--component_update_diagnostics {full,inactive}`, default unset.
+  Unset preserves previous snapshot and native-gradient diagnostic behavior.
+  Formal commands explicitly choose `inactive`; bounded validation chooses
+  `full` and rejects `inactive`. No existing Query-off/action-only default changes.
+- Inactive mode retains complete invariant checks for unsupervised groups and
+  native AdamW gradient removal. It omits active-group snapshots/deltas and the
+  duplicate native FP64 gradient norm. Ordinary loss, module-gradient, memory,
+  throughput, active/update flags, group step/LR and scheduler metrics remain.
+- Data flow, optimizer groups, parameter updates, moment updates, masks, loss
+  weights, model sources and scheduler advancement are unchanged. Missing
+  diagnostic values are omitted, not reported as fabricated zeros.
+- Tests: full/inactive exact parameter and optimizer/scheduler comparison,
+  zero-gradient valid supervision, skipped windows, partitioned native steps,
+  momentum/inactive/reactivation/resume, production loss-window routing and
+  command/default/bounded-mode checks. Execution results are recorded under
+  `outputs/three_stage_formal_20260909/performance_repair_20260909/`.
+- Operational status: the original complete update-1,000 checkpoint passed
+  inspection; all original processes exited by 2026-09-09 09:07:39 +08:00.
+  The new four-rank process launched at 09:12:40, restored the original online
+  W&B run, and verified all 626 VLM tensors and Query against the saved source.
+  That first resumed process was subsequently stopped before any new update
+  to apply the fast data-resume repair below. The earlier diagnosis records
+  the original slow mode; current GPU acceptance remains pending.
+- Formal resume orchestration reuses `scripts/run_three_stage_validation.py`,
+  `scripts/run_three_stage_formal.py` and `scripts/watch_three_stage_formal.py`.
+  Optional formal JSON key `stage1_resume_from_checkpoint` defaults absent;
+  when present, Stage 1 restores all state from that checkpoint with the same
+  W&B identity (`must`) and the unchanged full scheduler. Output must not
+  overwrite the source. Completion checks start at the saved update, and retry
+  checkpoint selection includes the initial source before the first new save.
+  Later stages inherit the resumed outputs; Stage 3 Expert remains base-only.
+  Tests cover restored source, W&B, budgets, future-stage routing, invalid
+  stage metadata and fallback to the initial saved state after an early failure.
+- Optional `--verify_resume_state` (default off, only valid for a same-stage
+  resume) reuses `utils/validation_resume.py` and its tensor fingerprints.
+  Once, after restoring rank RNG and before counting the next production
+  window's exposure, it compares native optimizer, FP32 master partitions
+  (including ZeRO padding), scheduler, rank RNG, sampler/cursor and main-rank
+  exposure against the actual saved checkpoint. It does not run a forward or
+  optimizer update. Formal Stage 1 resume enables it; ordinary/fresh training
+  has no added work. `tests/test_saved_resume_state.py` checks exact read-only
+  behavior and rejects moment/master/padding/scheduler/cursor/RNG/exposure
+  corruption. Existing initialization verification checks the loaded model.
+- CPU subprocess compatibility: `tests/optimizer_step_training_worker.py`
+  now applies the same CPU-only Accelerate unwrap isolation as
+  `scripts/test_three_stage_cpu.py`. The worker already explicitly uses
+  `Accelerator(cpu=True)`; this prevents optional DeepSpeed/Triton GPU-driver
+  initialization in fresh CPU/Gloo test processes. Production imports and
+  installed package versions are unchanged.
+- Operational continuation is an explicit, experiment-local script under
+  `performance_repair_20260909/continue_after_stop.py`. Default mode only checks
+  readiness. `run-after-stop` requires the identified stop monitor's terminal
+  success, all tested code identities and the original complete step-1,000
+  checkpoint before materializing and invoking existing formal/retry runners.
+  Its narrow runtime-binding update archives previous certificates and leaves
+  the 61 MB source audit snapshot, all data payloads and statistics unchanged.
+  Validation consists of the 161 distinct passing CPU tests and production
+  stop/resume/throughput evidence to be completed by this run.
+
+## Fast Frozen-Data Resume
+
+- Date: 2026-09-09. User requested removal of historical image decoding and
+  tokenization during checkpoint recovery. The first resumed startup was
+  deliberately stopped at skipped micro-batch 1486 before any new optimizer
+  update; the original complete step-1000 checkpoint remains unchanged.
+- Existing code adapted: `train_vla.py` and the epoch/DataLoader helpers in
+  `utils/load_training_dataset.py`. External API reused: Hugging Face Accelerate
+  1.6.0, `accelerate.data_loader.skip_first_batches` / `SkipBatchSampler`.
+  No custom sampling algorithm or new epoch permutation is introduced.
+- Switch: `--fast_resume_data_skip`, default false. New three-stage commands
+  explicitly enable it; legacy Query-off/action-only calls retain their old
+  behavior. Enabled mode requires frozen `Stage05MixedPretrainingDataset`,
+  optionally wrapped by the existing deterministic `SlotSupervisedDataset`.
+- `resume_dataloader_at_batch` wraps the already distributed batch sampler,
+  skips indices before Dataset reads, restores the explicit epoch and retains
+  batch-size/sharding attributes omitted by Accelerate's skip wrapper so tail
+  remainder accounting is unchanged. An exact epoch-end cursor returns an empty
+  iterator. The training loop enumerates from the saved absolute micro-batch
+  index and retains the original full DataLoader length for scheduler and
+  checkpoint contracts. Subsequent epochs use the original full loader.
+- Saved model, optimizer, scheduler, rank RNG, sampler seed/cursor and exposure
+  handling are unchanged. The existing pending-RNG restore remains immediately
+  before the first new production window's state verification and update.
+- Verification: 89 passing CPU tests in `fast_resume_cpu_r4.xml`, including real
+  two-rank Gloo, all four rank layouts, workers 0/2, multiple epochs, exact tensor
+  and RNG comparison, GAS=2 absolute indices, tail/epoch-end recovery, no
+  historical Dataset reads and rejection of unsupported data wrappers.
+- Real frozen Stage 3 sampler benchmark: 24,059,815 rows, four ranks, micro-batch
+  16, GAS 2. Skipping 2000 / 200000 local micro-batches and returning the first
+  index-only window took 0.2508 / 12.3928 seconds. Both matched the original
+  sampler exactly and read only two current batches plus one lookahead batch.
+  These timings exclude image decoding and model loading. Index generation
+  still traverses the current epoch's prefix; historical image/label reads are
+  eliminated. No claim of constant-time total checkpoint loading is made.
+- Artifacts and actual-window verification: the existing performance repair
+  experiment directory. New formal/retry configurations are
+  `configs/three_stage_formal_fast_resume_20260909.json` and
+  `configs/three_stage_formal_fast_retry_20260909.json`; new outputs are under
+  `outputs/three_stage_formal_20260909/speed_resume_direct_1000`.
+- Source audit and statistics are reused. Previous runtime bindings are archived
+  before binding the tested change; no source audit or model diagnostic optimizer
+  update is run. Actual resumed throughput remains to be measured.
+- Actual production-input evidence: `fast_resume_real_windows.json` contains
+  twelve exact matches against the previously saved full-model next-window
+  hashes: all four ranks for each of Stage 1/2/3, including image/text/Slot/Flow
+  and action tensors as enabled by that stage. No optimizer update or CUDA
+  initialization was performed by the CPU verification.
+- The new formal launch reached the UUID resource gate on 2026-09-09 at
+  09:59:48 +08:00 but did not launch a training child: GPU 0 was occupied by
+  NVML PID 1534740 (15364 MiB; not visible in the current PID namespace).
+  The original gate and all three configured retry gates timed out. The retry
+  watcher exited at 10:11:03 +08:00 with `retry_supervisor_stopped`; no training
+  child or optimizer update started in the new output sequence. The original
+  step-1000 checkpoint remains the resume source. Full resumed optimizer/RNG
+  verification and the sustained 1000-updates/hour goal are not yet proven.
+  GPU thresholds were not relaxed, and the external process was not signaled.
+
+## Residual Stage 1 Worker Cleanup and Continuation
+
+- Date: 2026-09-09. The user explicitly authorized termination of their residual
+  Stage 1 process and renewed four-GPU training. Read-only device-holder checks
+  identified orphan workers 54224/54229/54276 in old rank-0 group/session 51717,
+  with the interrupted `speed_resume_1000/stage1_ar/train.log` as stdout. The
+  earlier external-process attribution above was incorrect: SIGTERM to these
+  three verified workers released the NVML allocation and all four GPUs.
+- This is an operational correction using OS process identity and signals;
+  no training runtime, sampling or optimizer code changed. Worker UID, parent,
+  group/session, source log and start time were checked before termination.
+  Evidence: `performance_repair_20260909/orphan_workers_released.json` under the
+  original formal output. Zero new optimizer updates were performed by cleanup.
+- The existing formal launcher and retry supervisor are reused with
+  `configs/three_stage_formal_four_gpu_resume_20260909.json` and
+  `configs/three_stage_formal_four_gpu_retry_20260909.json`. Their explicit
+  commands write to `speed_resume_four_gpu_1000`, preserving all prior outputs
+  and resuming the original complete update-1000 checkpoint. No new feature
+  switch or default is introduced. Same tested code and saved audit binding
+  apply; final budgets, global batch 128 and mandatory online W&B are unchanged.
+- Existing 89 fast-resume tests and twelve exact real input-window comparisons
+  still apply. Full-model resumed state and throughput acceptance are pending.
+- Actual resume passed: all 626 VLM tensors and the Query tensor match source
+  update 1000; optimizer, FP32 masters, scheduler, RNG and sampler/cursor match
+  on all four ranks, with main-rank exposure exact. The first new update was
+  1001, with batch 128 / GAS 2 and scheduler 1000 to 1001. Original online W&B
+  identity resumed. Launch-to-first-update wall time was 273.004 seconds;
+  historical Dataset reads during cursor skipping were zero. Evidence:
+  `four_gpu_resume_verified.json` in the repair directory. This supersedes the
+  pending resumed-state status; sustained throughput remains under measurement.
+- The explicitly invoked experiment-local `observe_resumed_training.py` reuses
+  TensorBoard `EventAccumulator` and the existing retry helper `process_identity`.
+  It reads metrics, scalar wall times and OS/GPU status, checks consecutive
+  updates/batch/scheduler, and writes observation/measurement JSON artifacts.
+  It performs no forward, optimizer update, restart or signal. The 1001-to-2001
+  wall-time interval includes the step-2000 checkpoint. This read-only observer
+  is outside the training runtime and has no effect when not invoked.
+
+## Batched Detached Metric Reductions
+
+- Date: 2026-09-09. Purpose: reduce small distributed logging collectives while
+  retaining every logged statistic and the original gradient/update path.
+- Existing implementations adapted: `OptimizerStepMetricAccumulator.finalize`
+  in `utils/optimizer_step_loss.py` and `WandbTrainingLogger.log` in
+  `utils/wandb_training_logger.py`; both reuse Accelerate's existing public
+  `reduce` and `gather` APIs. Integration: `train_vla.py`, `utils/cli_options.py`
+  and the shared three-stage command builder.
+- Switch: `--batch_metric_reductions`, default false. Formal three-stage
+  commands explicitly enable it; bounded validation and old callers keep the
+  scalar reduction path. This is a logging optimization, not a model or loss
+  feature. No gradients, supervision masks, optimizer groups, scheduler,
+  sampler, data normalization, images or checkpoint tensor contents change.
+- Token sums/counts are stacked as FP64 columns for one sum reduction. Min/max
+  columns share one rank gather and retain their original per-column min/max
+  operation. Missing-statistic sentinels and global validity rules are kept.
+  AR/FM loss reductions remain unchanged. W&B numeric scalars retain the
+  existing FP32 conversion/mean reduction, packed into one collective and one
+  CPU transfer; strings/booleans and required-online failure handling remain.
+- Input: detached per-window token statistics and scalar log values. Output:
+  the same metric dictionary and W&B payload. Disabling the switch keeps the
+  previous collective sequence. Existing APIs could handle each scalar but
+  did not coalesce independent values; no new distributed backend is added.
+- Verification: exact off/on values, dtypes, masks, ratios, missing targets,
+  no autograd attachment, fewer collectives, real two-rank CPU/Gloo rank
+  differences, W&B main/non-main/disabled/failure behavior, and production
+  optimizer-window output/parameter parity. Test results and actual GPU
+  throughput will be recorded in the performance repair report.
+- Operational status: changes are being tested in the current worktree while
+  the existing four-GPU process continues with its already loaded runtime.
+  Activation requires a complete checkpoint boundary and explicit binding to
+  the unchanged saved audit. No source re-audit is part of this change.
+- Test result: all 105 cases in `batched_metrics_cpu_r1.xml` pass. The exact
+  tested 64-file runtime identity is saved in `batched_metrics_tested_runtime.json`.
+  An additional CPU process-group test passes: the reused experiment-local
+  `stop_after_checkpoint.py` accepts explicit run, target, process IDs and an
+  opt-in `--cleanup-rank-groups`, verifies each rank's group/session/log, and
+  waits for all group members to exit after a committed checkpoint. Its old
+  default remains the original stop request; historical evidence is preserved.
+- Monitor 105039 is attached to the existing four-GPU process for update 2000.
+  New formal/retry configuration files use `three_stage_formal_batched_*` names
+  and preserve the completed first segment. The reused runtime binding helper
+  accepts explicit baseline/config/test/stop/receipt inputs and verifies the
+  saved tested runtime before activation. All prior certificates are archived;
+  the source audit is unchanged. Actual throughput remains pending.
+- Actual boundary: the first repaired process retained all updates 1001-2000,
+  saved complete update 2000 and exited with all rank groups cleaned at
+  11:43:05 +08:00. Its 999 timed intervals including the save measured 984.107
+  updates/hour. Evidence: `initial_resumed_throughput.json` and
+  `metric_batching_stop_completed.json`. The observer now accepts explicit
+  run, step interval, supervisor/rank IDs, checkpoint step and artifact prefix;
+  defaults retain the prior invocation. This read-only adaptation lets the
+  next process measure 2001-3001 without replacing historical evidence.
+- The batched runtime was activated after that complete stop. The existing
+  experiment-local continuation launcher now accepts explicit formal/retry
+  config and receipt paths, keeping old defaults. Supervisor 114749 and watcher
+  114803 started the four-GPU continuation. Before update 2001, all four saved
+  optimizer/master/scheduler/RNG/cursor states matched exactly, as did VLM/Query
+  source tensors and main-rank exposure. Launch-to-first-update: 274.203 seconds
+  at saved cursor 4000, versus 273.004 seconds at cursor 2000 in the prior
+  process; both read zero historical samples. Evidence:
+  `performance_repair_20260909/batched_resume_verified.json`. This demonstrates
+  actual resume at update 2000; sustained throughput is still under measurement.
+
+## Batched Local Scalar Transfers
+
+- Date: 2026-09-09. Purpose: eliminate duplicate scalar GPU-to-CPU reads for
+  TensorBoard and local JSON without removing metrics or changing their frequency.
+- Original implementation adapted: `train_vla.py::json_scalar_metrics` and the
+  existing `do_log` block. Existing `tensorboard_loss_value` semantics remain:
+  tensor values are detached and converted to FP32 before Python floats;
+  non-tensor numbers retain the original Python float conversion; strings and
+  booleans retain their types in JSON. Dictionary order is preserved.
+- Switch: reuse `--batch_metric_reductions`, default false. The helper's
+  `batch_tensors` argument also defaults false. When enabled, scalar tensors
+  share one CPU transfer per device; TensorBoard and JSON reuse that local
+  dictionary. W&B retains the original rank-local tensor inputs and its
+  already-tested collective batching. Empty/non-tensor dictionaries are valid;
+  multi-element tensors are rejected like the original scalar conversion.
+- This is an adaptation of existing local logging, not a model/data feature.
+  The old helper separately converted each scalar and the caller repeated that
+  work for two consumers. Forward/backward, losses, finite-gradient checks,
+  optimizer groups, update protection, scheduler and data cursor are unchanged.
+  Disabling the flag retains the former scalar conversion and call ordering.
+- Verification: tests cover FP64/FP32/FP16/BF16/integer/bool tensors, scalar
+  shapes, Python and NumPy precision, strings, booleans, order, NaN/Inf/signed
+  zero, unchanged inputs/autograd, absent tensors and non-scalar rejection.
+  The production-window and distributed metric regressions run alongside them.
+  Results and actual GPU throughput remain pending until recorded.
+- Planned activation: preserve complete update 3000 in `speed_resume_batched_2000`,
+  then use `configs/three_stage_formal_local_scalars_resume_20260909.json` and
+  its retry policy to continue under `speed_resume_local_scalars_3000`.
+  All completed updates remain retained; no source audit is repeated.
+- Result: 115 regressions pass in `local_scalars_cpu_r1.xml` (179.34 seconds);
+  the final ten focused serializer tests also pass. Tested runtime/report hashes
+  are in `local_scalars_tested_runtime.json`. Stop monitor 124600 waits for
+  complete update 3000 and checks all rank groups are cleaned. Current runtime
+  throughput closes at 2001-3000 (999 elapsed intervals, 1000 retained updates);
+  the next runtime will be measured over 3001-4001 including the update-4000
+  checkpoint. Full-model throughput for this last adaptation is not yet proven.
+- The final local-logging adaptation also uses the existing TensorBoard standard
+  `Summary` format to write scalar values in one event per update.
+  `write_tensorboard_training_metrics` extracts the old loop and reuses
+  `torch.utils.tensorboard.summary.scalar` plus `FileWriter.add_summary`;
+  tag sanitization, scalar precision, loss-name mapping and text summaries are
+  preserved. All scalar tags/steps/values remain available to EventAccumulator.
+  The scalars within a packed event share its wall time; the separate
+  `learning-rate` timing event is unchanged. Default/off mode retains separate
+  `SummaryWriter.add_scalar` calls. No new external implementation is copied.
+- Final verification superseding the scalar-only 115-case report: 118 tests pass
+  in `local_logging_cpu_r1.xml` (144.40 seconds), including real TensorBoard
+  event-file comparisons for empty, text-only and mixed metrics. All scalar and
+  text tags, steps and values match; summary write count decreases. The final
+  tested identity is `local_logging_tested_runtime.json`; the earlier scalar-only
+  identity remains historical and must not be used for activation.
+- CPU-only benchmark of the actual logging helper with 103 current metrics and
+  100 windows: separate writes 32.730 ms/window, batched writes 3.193 ms/window,
+  including writer close. All loaded scalar/text values match. Evidence:
+  `local_logging_cpu_benchmark.json`. This excludes GPU transfers and model
+  execution; actual full-model throughput still requires measurement.
+- Runtime status after activation: the production continuation from update 3000
+  remains active under supervisor 135625 and retry watcher 135700. The
+  read-only observer was intentionally stopped at update 3633 after recording
+  a 356.278-second rolling 100-update window (1010.448 updates/hour), with no
+  skipped windows or W&B failures. This status is recorded in the formal
+  experiment and performance-repair reports; no further polling is required.

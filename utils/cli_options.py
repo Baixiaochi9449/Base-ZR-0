@@ -32,9 +32,25 @@ def _add_difference_query_options(parser: argparse.ArgumentParser) -> None:
 def build_train_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--training_stage", choices=tuple(STAGES), default=None)
+    parser.add_argument("--component_optimizer_groups", action="store_true")
+    parser.add_argument("--component_update_diagnostics", choices=("full", "inactive"), default=None,
+                        help="Full per-group state deltas, or only inactive-group invariance checks; "
+                             "unset preserves legacy diagnostics. Does not disable update protection or ordinary metrics.")
+    parser.add_argument("--bounded_three_stage_validation", action="store_true")
+    parser.add_argument("--verify_three_stage_initialization", action="store_true",
+                        help="Verify exact three-stage component origins and checkpoint serialization before updates.")
+    parser.add_argument("--verify_resume_state", action="store_true",
+                        help="Compare restored ZeRO-2 optimizer, scheduler, RNG and sampler/exposure state once before updates.")
+    parser.add_argument("--fast_resume_data_skip", action="store_true",
+                        help="Skip historical batch indices before dataset reads on frozen three-stage datasets.")
+    parser.add_argument("--three_stage_preparation_config", type=str)
+    parser.add_argument("--save_and_exit_after_updates", type=int, default=None,
+                        help="Save full state and exit at this successful global update, without shortening the scheduler.")
+    parser.add_argument("--max_consecutive_skipped_windows", type=int, default=None)
     parser.add_argument("--slot_aux_type", default="none")
     from utils.slot_config import SlotConfig
     parser.add_argument("--slot_supervision_dir")
+    parser.add_argument("--preparation_audit_cache", default=None)
     parser.add_argument("--aux_dataset_config", help="Versioned per-dataset auxiliary artifact paths")
     for name, value in SlotConfig().to_dict().items():
         if name == "slot_aux_type":
@@ -178,6 +194,10 @@ def build_train_parser() -> argparse.ArgumentParser:
         "--tune_vlm", action="store_true", help="Whether to fine-tune the VLM"
     )
     parser.add_argument(
+        "--batch_metric_reductions", action="store_true",
+        help="Batch detached token-statistic and W&B scalar collectives without changing training objectives.",
+    )
+    parser.add_argument(
         "--tune_action_expert",
         action="store_true",
         help="Whether to fine-tune the projectors in the action expert",
@@ -314,6 +334,8 @@ def build_train_parser() -> argparse.ArgumentParser:
             "and uses 4 for episode-grouped datasets."
         ),
     )
+    parser.add_argument("--prefetch_factor", type=int, default=3,
+        help="DataLoader prefetch batches per worker; legacy default is 3.")
     return parser
 
 
@@ -469,6 +491,8 @@ def parse_train_options(args=None) -> argparse.Namespace:
         parser.error("--action_horizon must be positive")
     if options.dataloader_num_workers is not None and options.dataloader_num_workers < 0:
         parser.error("--dataloader_num_workers must be non-negative")
+    if options.prefetch_factor < 1:
+        parser.error("--prefetch_factor must be positive")
     if options.dataset_sample_ratios is not None:
         if options.dataset_entries is None or len(options.dataset_sample_ratios) != len(
             options.dataset_entries
@@ -481,6 +505,11 @@ def parse_train_options(args=None) -> argparse.Namespace:
             for ratio in options.dataset_sample_ratios
         ):
             parser.error("--dataset_sample_ratios values must be finite and in (0, 1]")
+    try:
+        from utils.bounded_validation import validate_update_limits
+        validate_update_limits(options)
+    except ValueError as error:
+        parser.error(str(error))
     return options
 
 

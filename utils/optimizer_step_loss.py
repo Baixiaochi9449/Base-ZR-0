@@ -276,12 +276,14 @@ class OptimizerStepMetricAccumulator:
         action_expert_loss_weight: float,
         collect_diagnostics: bool = False,
         device=None,
+        batch_metric_reductions: bool = False,
     ):
         self.loss_type = loss_type
         self.vlm_loss_weight = float(vlm_loss_weight)
         self.action_expert_loss_weight = float(action_expert_loss_weight)
         self.collect_diagnostics = bool(collect_diagnostics)
         self.device = device
+        self.batch_metric_reductions = batch_metric_reductions
         self._loss_sums = {}
         self._loss_counts = {}
         self._token_stats = {}
@@ -451,22 +453,16 @@ class OptimizerStepMetricAccumulator:
             dtype=torch.float64,
         )
 
+        packed_tokens = self._batched_token_statistics(accelerator) if self.batch_metric_reductions else None
         for key, spec in TOKENIZATION_METRIC_SCHEMA.items():
-            if key in self._token_stats:
-                stats = self._token_stats[key]
-                local_sum = stats["sum"]
-                local_count = stats["count"]
-                local_min = stats["min"]
-                local_max = stats["max"]
+            if packed_tokens is None:
+                local_sum, local_count, local_min, local_max = self._local_token_statistics(key, reference_device)
+                global_sum = self._reduce(accelerator, local_sum, "sum")
+                global_count = self._reduce(accelerator, local_count, "sum")
+                global_min = self._reduce(accelerator, local_min, "min")
+                global_max = self._reduce(accelerator, local_max, "max")
             else:
-                local_sum = torch.zeros((), dtype=torch.float64, device=reference_device)
-                local_count = torch.zeros((), dtype=torch.float64, device=reference_device)
-                local_min = torch.full((), float("inf"), dtype=torch.float64, device=reference_device)
-                local_max = torch.full((), float("-inf"), dtype=torch.float64, device=reference_device)
-            global_sum = self._reduce(accelerator, local_sum, "sum")
-            global_count = self._reduce(accelerator, local_count, "sum")
-            global_min = self._reduce(accelerator, local_min, "min")
-            global_max = self._reduce(accelerator, local_max, "max")
+                global_sum, global_count, global_min, global_max = packed_tokens[key]
             if global_count.item() <= 0:
                 continue
             mean = global_sum / global_count
@@ -504,3 +500,23 @@ class OptimizerStepMetricAccumulator:
                 value = bool(self._reduce(accelerator, flag, "sum").item())
             metrics[key] = value
         return metrics
+
+    def _local_token_statistics(self, key, device):
+        if key in self._token_stats:
+            return tuple(self._token_stats[key][name] for name in ("sum", "count", "min", "max"))
+        return (torch.zeros((), dtype=torch.float64, device=device),
+                torch.zeros((), dtype=torch.float64, device=device),
+                torch.full((), float("inf"), dtype=torch.float64, device=device),
+                torch.full((), float("-inf"), dtype=torch.float64, device=device))
+
+    def _batched_token_statistics(self, accelerator):
+        keys = tuple(TOKENIZATION_METRIC_SCHEMA)
+        if not keys:
+            return {}
+        local = torch.stack([torch.stack([value.to(device=accelerator.device)
+            for value in self._local_token_statistics(key, accelerator.device)]) for key in keys]).detach()
+        sums = accelerator.reduce(local[:, :2].contiguous(), reduction="sum").detach()
+        # Preserve the existing per-rank gather and min/max semantics by column.
+        extrema = accelerator.gather(local[None, :, 2:].contiguous()).detach()
+        minima, maxima = extrema[:, :, 0].min(dim=0).values, extrema[:, :, 1].max(dim=0).values
+        return {key: (sums[i, 0], sums[i, 1], minima[i], maxima[i]) for i, key in enumerate(keys)}

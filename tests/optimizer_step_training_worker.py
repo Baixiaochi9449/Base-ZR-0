@@ -137,8 +137,12 @@ def _scenario(name, rank, distributed, distributed_partition="original"):
 
 
 def _execute(
-    *, loss_type, gas, combined, distributed, scenario, distributed_partition="original"
+    *, loss_type, gas, combined, distributed, scenario, distributed_partition="original",
+    batch_metric_reductions=False,
 ):
+    # Match the CPU suite runner; this worker also runs in fresh subprocesses.
+    import accelerate.utils.other
+    accelerate.utils.other.is_deepspeed_available = lambda: False
     accelerator = Accelerator(cpu=True, gradient_accumulation_steps=gas)
     rank = accelerator.process_index
     batches = _scenario(scenario, rank, distributed, distributed_partition)
@@ -161,6 +165,7 @@ def _execute(
         vlm_loss_weight=2.0,
         action_expert_loss_weight=5.0,
         next_global_step=1,
+        batch_metric_reductions=batch_metric_reductions,
     )
     accelerator.wait_for_everyone()
     unwrapped = accelerator.unwrap_model(model)
@@ -189,6 +194,7 @@ def main():
     )
     parser.add_argument("--scenario", default="standard")
     parser.add_argument("--comparison-suite", action="store_true")
+    parser.add_argument("--batch-metric-reductions", action="store_true")
     args = parser.parse_args()
 
     if args.comparison_suite:
@@ -248,6 +254,7 @@ def main():
         distributed=args.distributed,
         scenario=args.scenario,
         distributed_partition=args.distributed_partition,
+        batch_metric_reductions=args.batch_metric_reductions,
     )
     if accelerator.is_main_process:
         print("RESULT " + json.dumps(payload, sort_keys=True))

@@ -184,9 +184,17 @@ class Stage05MixedPretrainingDataset(torch.utils.data.Dataset):
         self.video_backend = str(entry.get("video_backend", "pyav"))
         self.max_transient_retries = int(entry.get("max_transient_retries", 2))
         self.natural_mix_block_size = 128
-        self.manifest = load_stage05_sidecar(
+        audit_cache = None
+        sidecar_loader = load_stage05_sidecar
+        sidecar_arguments = {"verify_source": bool(entry.get("verify_sidecar_source", True))}
+        if entry.get("preparation_audit_cache"):
+            from utils.preparation_audit_cache import load_preparation_audit_cache, load_cached_sidecar
+            audit_cache = load_preparation_audit_cache(entry["preparation_audit_cache"])
+            sidecar_loader = load_cached_sidecar
+            sidecar_arguments = {"audit_cache": audit_cache}
+        self.manifest = sidecar_loader(
             self.sidecar_root,
-            verify_source=bool(entry.get("verify_sidecar_source", True)),
+            **sidecar_arguments,
             expected_generation={
                 "horizon": action_horizon,
                 "kind": self.kind,
@@ -218,7 +226,7 @@ class Stage05MixedPretrainingDataset(torch.utils.data.Dataset):
         self.indices = np.load(self.sidecar_root / index_name, mmap_mode="r", allow_pickle=False)
         self.episodes = pq.read_table(self.sidecar_root / "episodes.parquet").to_pylist()
         self.episodes.sort(key=lambda row: int(row["dataset_from_index"]))
-        if loss_type == "aux":
+        if loss_type == "aux" and not (audit_cache is not None and entry.get("frozen_stage_index")):
             packed = np.load(self.sidecar_root / "validity_packed.npy", mmap_mode="r", allow_pickle=False)
             main_valid = np.unpackbits(packed[:, 0])[:self.manifest["counts"]["source_frames"]]
             self.indices = np.flatnonzero(main_valid)
@@ -298,6 +306,17 @@ class Stage05MixedPretrainingDataset(torch.utils.data.Dataset):
                 source_camera_keys=list(entry["camera_keys"]),
             ),
         )
+        self.frozen_index = bool(entry.get("frozen_stage_index"))
+        if self.frozen_index:
+            from utils.frozen_stage_index import load_frozen_stage_index
+            self.indices, identity = load_frozen_stage_index(entry["frozen_stage_index"],
+                dataset_root=self.root, sidecar_root=self.sidecar_root,
+                phase="joint" if loss_type == "vlm_and_action" else "ar", audit_cache=audit_cache)
+            auxiliary = dict(self.spec.auxiliary_contract or {})
+            auxiliary["frozen_stage_index"] = identity
+            self.spec = replace(self.spec, auxiliary_contract=auxiliary,
+                training_eligibility_source=str(Path(entry["frozen_stage_index"]).resolve()))
+            self._frozen_validity = np.load(self.sidecar_root / "validity_packed.npy", mmap_mode="r", allow_pickle=False)
 
     def _load_source_episode_metadata(self) -> dict[int, dict[str, Any]]:
         result = {}
@@ -327,7 +346,7 @@ class Stage05MixedPretrainingDataset(torch.utils.data.Dataset):
         del epoch
 
     def sampling_group_ranges(self) -> list[tuple[int, int]]:
-        if self.loss_type == "aux":
+        if self.loss_type == "aux" or getattr(self, "frozen_index", False):
             boundaries = np.searchsorted(self.indices, self.episode_stops)
             starts = np.concatenate(([0], boundaries[:-1]))
             return [(int(a), int(b)) for a, b in zip(starts, boundaries) if b > a]
@@ -359,6 +378,8 @@ class Stage05MixedPretrainingDataset(torch.utils.data.Dataset):
 
     def _columns(self) -> list[str]:
         columns = ["episode_index", "frame_index", "index", "task_index", "train_data", "slot_data"]
+        if getattr(self, "frozen_index", False) and self.loss_type == "vlm":
+            columns.remove("slot_data")
         if self.embedded_images:
             columns += ["first_view", "wrist_image"]
         else:
@@ -556,20 +577,30 @@ class Stage05MixedPretrainingDataset(torch.utils.data.Dataset):
         if target is None:
             result["labels"] = torch.full_like(result["input_ids"], -100)
         if self.loss_type == "vlm_and_action":
-            result.update(self._action_inputs(episode, rows, base))
+            fm_available = not self.frozen_index or bool(
+                (self._frozen_validity[global_index // 8, 4] >> (7 - global_index % 8)) & 1)
+            if fm_available:
+                result.update(self._action_inputs(episode, rows, base))
+            else:
+                result.update({"observation.state": torch.zeros(1, self.max_pad_length),
+                    "state_mask": torch.zeros(1, self.max_pad_length, dtype=torch.bool),
+                    "action": torch.zeros(self.action_horizon, self.max_pad_length),
+                    "action_mask": torch.zeros(self.action_horizon, self.max_pad_length, dtype=torch.bool),
+                    "action_supervision_available": torch.tensor(False)})
         result["sub_task_flag"] = torch.tensor(0)
         result["dataset_id"] = torch.tensor(self.dataset_id, dtype=torch.long)
         result["sample_global_index"] = torch.tensor(global_index, dtype=torch.long)
         result["episode_id"] = torch.tensor(episode, dtype=torch.long)
         result["frame_id"] = torch.tensor(int(row["frame_index"]), dtype=torch.long)
         result["ar_eligible"] = torch.tensor(target is not None)
-        result["fm_eligible"] = torch.tensor(self.loss_type == "vlm_and_action")
-        result["strict_joint_fm"] = torch.tensor(self.loss_type == "vlm_and_action")
+        result["fm_eligible"] = (result.get("action_supervision_available", torch.tensor(False)) if self.frozen_index
+                                 else torch.tensor(self.loss_type == "vlm_and_action"))
+        result["strict_joint_fm"] = torch.tensor(self.loss_type == "vlm_and_action" and not self.frozen_index)
         # Preserve source annotations and routing identity for audits. These fields
         # are collated as metadata lists and are never consumed by either loss.
         result["task"] = str(episode_meta["task"])
         result["train_data"] = target
-        if self.loss_type != "aux":
+        if self.loss_type != "aux" and not (self.frozen_index and self.loss_type == "vlm"):
             result["slot_data"] = row.get("slot_data")
         result["stats_key"] = str(self.entry.get("stats_key") or "")
         if self.flow_reader is not None:

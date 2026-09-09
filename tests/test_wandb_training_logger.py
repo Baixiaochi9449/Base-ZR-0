@@ -141,6 +141,42 @@ class WandbTrainingLoggerTest(unittest.TestCase):
         self.assertEqual(fake_wandb.run.logs, [])
         self.assertEqual(fake_wandb.run.finished, [])
 
+    def test_component_python_scalars_share_tensor_reduction_on_every_rank(self):
+        for is_main_process in (True, False):
+            with self.subTest(is_main_process=is_main_process):
+                accelerator = FakeAccelerator(is_main_process=is_main_process)
+                fake_wandb = FakeWandb()
+                logger = self.make_logger(accelerator, fake_wandb)
+                loss = torch.tensor(2.0, dtype=torch.float64, requires_grad=True)
+                metrics = {
+                    "train/loss": loss,
+                    "train/vlm_native_grad_norm": 0.25,
+                    "train/scheduler_step_after": 1,
+                    "train/optimizer_update_applied": True,
+                    "train/optimizer_skip_reason": "none",
+                }
+                with patch.object(accelerator, "reduce", wraps=accelerator.reduce) as reduce:
+                    logger.log(step=1, mean_metrics=metrics, scalar_metrics={})
+                self.assertEqual(accelerator.reduce_calls,
+                    [(2.0, "mean"), (0.25, "mean"), (1.0, "mean")])
+                for call in reduce.call_args_list:
+                    tensor = call.args[0]
+                    self.assertEqual(tensor.dtype, torch.float32)
+                    self.assertEqual(tensor.device, accelerator.device)
+                    self.assertFalse(tensor.requires_grad)
+                self.assertTrue(loss.requires_grad)
+                self.assertEqual(loss.dtype, torch.float64)
+                if is_main_process:
+                    payload, step = fake_wandb.run.logs[0]
+                    self.assertEqual(step, 1)
+                    self.assertEqual(payload["train/vlm_native_grad_norm"], 1.25)
+                    self.assertEqual(payload["train/scheduler_step_after"], 2.0)
+                    self.assertIs(payload["train/optimizer_update_applied"], True)
+                    self.assertEqual(payload["train/optimizer_skip_reason"], "none")
+                else:
+                    self.assertEqual(fake_wandb.run.logs, [])
+                    self.assertEqual(fake_wandb.init_calls, [])
+
     def test_empty_project_disables_wandb_and_collectives(self):
         accelerator = FakeAccelerator(is_main_process=True)
         fake_wandb = FakeWandb()

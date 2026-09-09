@@ -1,6 +1,18 @@
 # Four-Dataset DQ32 H10 GBS256 Seed42
 
-## Current Status: Formal AR Running
+## Current Status: Formal AR Stopped After Step 1256
+
+Checked on2026-09-06 Asia/Shanghai. Formal AR launched12:54:36 and the sequential runner recorded exit1 at15:12:14, after1256 of27582 completed optimizer updates (321536 global samples). Final loss0.2987856567, minimum recorded training loss0.1740577966, LR9.109862219e-6, Query/VLM gradient norms0.05120210/1.50572026; recorded target truncation remains zero and W&B was connected. No validation or rollout was run. Actual micro32/GAS2/world4/GBS256 and all planned training parameters remained unchanged.
+
+The first observed failure was rank0 DataLoader worker2 opening a PyAV decoder for DROID global_index2041670: `av.error.MemoryError: [Errno 12] Cannot allocate memory`. The sample maps to episode7035/frame52, main-camera video `videos/observation.images.exterior_1_left/chunk-000/file-022.mp4`, timestamp560.5333333651224. The existing dataset error wrapper propagated this error; Accelerate terminated the remaining ranks and the runner stopped all subsequent stages. This traceback is a CPU video-decoder allocation failure, not a reported CUDA OOM or token-length failure.
+
+Read-only diagnosis: one CPU decode of that exact frame through the installed production PyAV path succeeded, producing shape[1,3,180,320]. No dataset scan, token audit, optimizer update or training restart was performed. W&B's last host-memory sample at15:11:46 showed1541038.98MiB available; that host-level measurement does not establish worker/container headroom. The container memory limit is480GiB, with historical peak480GiB/failcnt18/oom_kill11. These counters have no event timestamps; there is no matching kernel OOM-kill record in15:00-15:20, so they do not establish the cause of this failure. Exact worker memory/thread usage at the exception is unavailable, and resource exhaustion versus decoder resource accumulation remains unresolved.
+
+No formal checkpoint exists: the run stopped before its first configured5000-step save, so the1256 formal updates cannot be resumed from disk. Existing probe step2/step3 checkpoints and all prior artifacts remain preserved and are not substitutes for formal state. The formal tmux/runner/ranks have exited; GPUs0-3 were idle at diagnosis. Joint probe/resume/formal never started, and no automatic continuation remains active.
+
+Evidence: run-root `formal_ar.ar-formal.ar_formal_after_gate.log` (first error line3346), `formal/ar/training_metrics.jsonl`, `lifecycle.jsonl`, and sibling `.formal_continue.log`. This investigation updates documentation only; no code, configuration, checkpoint or dependency is changed, and no commit is created.
+
+## Historical Status: Formal AR Running
 
 As of2026-09-06 12:58:51 Asia/Shanghai, formal AR has recorded17 optimizer updates. First step loss3.8246400356; step17 loss3.3913247585, LR1.2509064539521395e-7, Query/VLM gradient norms426.51556/405.86154. All recorded loss/LR/gradients are finite and target truncation is zero. Each update uses256 global samples; current peak reserved72.609375GiB. W&B remote_available=1. This is formal training under the27582-step budget, not an extended probe.
 

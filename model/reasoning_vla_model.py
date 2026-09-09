@@ -204,6 +204,11 @@ class ZR0Model(nn.Module):
                     raise ValueError(
                         f"failed to read checkpoint metadata {metadata_path}: {error}"
                     ) from error
+            if training_stage is not None:
+                from utils.stage05_checkpoint_contract import validate_action_expert_config_provenance
+                provenance = validate_action_expert_config_provenance(checkpoint_path, metadata_payload)
+                if provenance is not None:
+                    self.action_expert_config_original_bytes = (checkpoint_path / provenance["source_file"]).read_bytes()
             if _checkpoint_has_stage05_identity(
                 checkpoint_path.resolve(), metadata_payload
             ) and checkpoint_load_purpose is None and training_stage is None:
@@ -212,13 +217,15 @@ class ZR0Model(nn.Module):
                 )
             if training_stage is not None and _checkpoint_has_stage05_identity(checkpoint_path.resolve(), metadata_payload):
                 source_purpose = (STAGE05_AR_TO_JOINT if metadata_payload.get("checkpoint_kind") == "ar_only" else DOWNSTREAM_FINETUNE)
-                validate_stage05_checkpoint_for_purpose(
+                source_config = validate_stage05_checkpoint_for_purpose(
                     checkpoint_path, purpose=source_purpose,
-                    external_config_path=action_expert_config_path or checkpoint_path / "action_expert_config.json",
+                    external_config_path=checkpoint_path / "action_expert_config.json",
                     requested_action_horizon=action_expert_config.action_horizon,
                     expected_action_dim=action_expert_config.action_dim,
                     expected_state_dim=action_expert_config.state_dim,
                     expected_num_difference_queries=num_difference_queries or 32)
+                if source_config.parsed_sha256 != _canonical_json_hash(action_expert_config.to_dict()):
+                    raise ValueError("inherited checkpoint Action Expert runtime config mismatch")
             if "action_expert_contract" in metadata_payload and (training_stage is None or checkpoint_source == action_expert_name_or_path):
                 from utils.action_expert_config import read_vlm_hidden_size
 
@@ -947,7 +954,28 @@ class ZR0Model(nn.Module):
         is_stage05_joint = is_stage05_four_dataset_manifest(
             self.resolved_dataset_manifest, expected_loss_type="vlm_and_action"
         ) and self.loss_type == "vlm_and_action"
-        if is_stage05_ar or is_stage05_joint:
+        config_provenance = None
+        source_bytes = getattr(self, "action_expert_config_source_bytes", None)
+        if getattr(self, "training_stage", None) and source_bytes is not None:
+            from utils.action_expert_config import load_action_expert_config
+
+            if hashlib.sha256(source_bytes).hexdigest() != self.action_expert_config_source_sha256:
+                raise ValueError("Stage05 Action Expert source config hash mismatch")
+            original_bytes = getattr(self, "action_expert_config_original_bytes", source_bytes)
+            original_path = Path(save_directory) / "action_expert_source_config.json"
+            original_path.write_bytes(original_bytes)
+            source = load_action_expert_config(original_path,
+                action_horizon_override=resolved_action_config["action_horizon"])
+            if source.parsed_sha256 != _canonical_json_hash(resolved_action_config):
+                raise ValueError("Action Expert source/runtime configs differ beyond the horizon")
+            Path(action_config_path).write_text(json.dumps(resolved_action_config, indent=4, sort_keys=True) + "\n")
+            config_provenance = {"version": 1, "source_file": original_path.name,
+                "source_raw_sha256": hashlib.sha256(original_bytes).hexdigest(),
+                "runtime_raw_sha256": hashlib.sha256(Path(action_config_path).read_bytes()).hexdigest(),
+                "source_action_horizon": source.source_action_horizon,
+                "runtime_action_horizon": source.config.action_horizon}
+            config_provenance["content_hash"] = _canonical_json_hash(config_provenance)
+        elif is_stage05_ar or is_stage05_joint:
             source_bytes = getattr(self, "action_expert_config_source_bytes", None)
             source_sha256 = getattr(
                 self, "action_expert_config_source_sha256", None
@@ -986,6 +1014,8 @@ class ZR0Model(nn.Module):
                 )
             )
             target_horizon = int(resolved_action_config["action_horizon"])
+            if config_provenance is not None:
+                source_horizon = config_provenance["source_action_horizon"]
             runtime_purpose = self.checkpoint_load_purpose or "legacy"
             # A newly saved Stage05 Joint artifact is the completed target of
             # AR-to-Joint initialization, but its future consumer semantics
@@ -1009,7 +1039,7 @@ class ZR0Model(nn.Module):
                 "raw_file_sha256": hashlib.sha256(
                     Path(action_config_path).read_bytes()
                 ).hexdigest(),
-                "source_config_sha256": getattr(
+                "source_config_sha256": config_provenance["source_raw_sha256"] if config_provenance else getattr(
                     self, "action_expert_config_source_sha256", None
                 ),
                 "canonical_sha256": _canonical_json_hash(resolved_action_config),
@@ -1044,11 +1074,14 @@ class ZR0Model(nn.Module):
                             slot_runtime_config_sha256=_canonical_json_hash(self.slot_config.to_dict()))
         if generic_contract is not None:
             metadata["action_expert_contract"] = generic_contract
+        if config_provenance is not None:
+            metadata["action_expert_config_provenance"] = config_provenance
         if is_stage05_ar or is_stage05_joint:
             metadata[STAGE05_AR_JOINT_CONTRACT_KEY] = build_stage05_ar_joint_contract(
                 checkpoint_directory=save_directory,
                 resolved_action_expert_config=resolved_action_config,
-                source_config_sha256=self.action_expert_config_source_sha256,
+                source_config_sha256=(config_provenance["runtime_raw_sha256"] if config_provenance
+                    else self.action_expert_config_source_sha256),
                 resolved_dataset_manifest=self.resolved_dataset_manifest,
                 vlm_hidden_size=self.backbone.model.config.text_config.hidden_size,
                 num_difference_queries=self.num_difference_queries,

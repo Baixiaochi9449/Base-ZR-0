@@ -10,14 +10,16 @@ from utils.slot_labels import VOCABULARIES
 
 
 class SlotSupervisionRouter:
-    def __init__(self, directory):
+    def __init__(self, directory, *, audit_cache=None):
         root = Path(directory)
+        if audit_cache is not None:
+            audit_cache.check(root / "slot_routes.json")
         routes = json.loads((root / "slot_routes.json").read_text())
         if routes.get("version") != 1:
             raise ValueError("unsupported Slot route version")
         self.readers = {}
         for identity, location in sorted(routes["datasets"].items()):
-            reader = SlotSupervisionReader(root / location)
+            reader = SlotSupervisionReader(root / location, audit_cache=audit_cache)
             if reader.stats.get("dataset_identity") != identity:
                 raise ValueError("Slot route dataset identity mismatch")
             self.readers[identity] = reader
@@ -52,7 +54,7 @@ def combined_slot_stats(datasets):
             "dataset_order": list(ordered), "datasets": ordered, "classes": classes}
 
 
-def load_slot_supervision(directory):
+def load_slot_supervision(directory, *, audit_cache=None):
     if (Path(directory) / "slot_routes.json").is_file():
-        return SlotSupervisionRouter(directory)
-    return SlotSupervisionReader(directory)
+        return SlotSupervisionRouter(directory, audit_cache=audit_cache)
+    return SlotSupervisionReader(directory, audit_cache=audit_cache)

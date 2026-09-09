@@ -439,7 +439,12 @@ def _resolve_stage05_spec(
     try:
         from utils.stage05_sidecar import load_stage05_sidecar, load_stage05_stats, sha256_file
 
-        sidecar_manifest = load_stage05_sidecar(sidecar, verify_source=False)
+        if entry.get("preparation_audit_cache"):
+            from utils.preparation_audit_cache import load_preparation_audit_cache, load_cached_sidecar
+            audit_cache = load_preparation_audit_cache(entry["preparation_audit_cache"])
+            sidecar_manifest = load_cached_sidecar(sidecar, audit_cache=audit_cache)
+        else:
+            sidecar_manifest = load_stage05_sidecar(sidecar, verify_source=False)
     except Exception as error:
         raise ValueError(f"{dataset_entry}: failed to resolve Stage05 sidecar: {error}") from error
     if sidecar_manifest.get("dataset_root") != str(root):

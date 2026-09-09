@@ -27,10 +27,12 @@ class WandbTrainingLogger:
         retry_max_steps=128,
         finish_max_attempts=2,
         finish_timeout_seconds=15.0,
+        batch_metric_reductions=False,
     ):
         self.accelerator = accelerator
         self.enabled = bool(project)
         self.run = None
+        self.batch_metric_reductions = bool(batch_metric_reductions)
         for name, value in (
             ("pending_capacity", pending_capacity),
             ("retry_base_steps", retry_base_steps),
@@ -178,15 +180,27 @@ class WandbTrainingLogger:
             return self.diagnostics()
 
         reduced_metrics = {}
+        numeric_names, numeric_values = [], []
         for name, value in mean_metrics.items():
             if isinstance(value, (str, bool)):
                 reduced_metrics[name] = value
                 continue
+            if self.batch_metric_reductions:
+                numeric_names.append(name)
+                numeric_values.append(torch.as_tensor(value, device=self.accelerator.device,
+                    dtype=torch.float32).detach().reshape(()))
+                continue
             reduced_value = self.accelerator.reduce(
-                value.detach().to(device=self.accelerator.device, dtype=torch.float32), reduction="mean"
+                torch.as_tensor(value, device=self.accelerator.device, dtype=torch.float32).detach(),
+                reduction="mean",
             )
             if self.accelerator.is_main_process:
                 reduced_metrics[name] = reduced_value.item()
+
+        if numeric_values:
+            reduced_values = self.accelerator.reduce(torch.stack(numeric_values), reduction="mean")
+            if self.accelerator.is_main_process:
+                reduced_metrics.update(zip(numeric_names, reduced_values.detach().cpu().tolist()))
 
         if self.run is not None:
             payload = ({**reduced_metrics, **scalar_metrics}, step)

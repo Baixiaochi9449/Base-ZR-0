@@ -29,7 +29,8 @@ def class_weights(counts, max_ratio):
     return (weights / (weights * counts).sum() * counts.sum()).tolist()
 
 
-def audit_slots(dataset_root, config, *, annotation_root=None, progress=None, dataset_identity=None, camera="first_view"):
+def audit_slots(dataset_root, config, *, annotation_root=None, progress=None, dataset_identity=None, camera="first_view",
+                allow_unannotated_episodes=False):
     root = Path(dataset_root).resolve()
     info = json.loads((root / "meta/info.json").read_text())
     if info.get("splits") != {"train": f"0:{info['total_episodes']}"}:
@@ -38,11 +39,19 @@ def audit_slots(dataset_root, config, *, annotation_root=None, progress=None, da
     source_root, _ = _resolve_annotation_root(root, annotation_root)
     if source_root is None:
         raise ValueError("source annotation root unavailable")
+    unannotated = set()
+    if allow_unannotated_episodes:
+        merge = json.loads((root / "meta/stage05_merge.json").read_text())
+        if merge.get("missing_stage05_policy") != "null":
+            raise ValueError("unannotated Slot episodes require declared null merge policy")
     anchors, source_hashes, intervals = {}, {}, []
     schemas, cameras, coordinates = Counter(), Counter(), Counter()
     for episode, entry in mapping.items():
         path = _active_training_samples(source_root, int(entry["old_episode_index"]))
         if path is None:
+            if allow_unannotated_episodes and not (source_root / f"episode_{int(entry['old_episode_index']):06d}").exists():
+                unannotated.add(episode)
+                continue
             raise ValueError(f"episode={episode}: missing active source annotations")
         source_hashes[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
         for line in path.read_text().splitlines():
@@ -83,6 +92,10 @@ def audit_slots(dataset_root, config, *, annotation_root=None, progress=None, da
             raw = json.loads(raw) if isinstance(raw, str) else raw
             digest.update(json_hash(row).encode())
             key = (int(row["episode_index"]), int(row["frame_index"]))
+            if key[0] in unannotated:
+                if raw is not None:
+                    raise ValueError(f"episode={key[0]} frame={key[1]}: unverifiable Slot labels in unannotated episode")
+                continue
             identity = f"dataset={root.name} episode={key[0]} frame={key[1]}"
             fields.update(k for k in (raw or {}) if k.startswith("query_"))
             if dataset_identity is not None and key not in anchors:
@@ -155,6 +168,10 @@ def audit_slots(dataset_root, config, *, annotation_root=None, progress=None, da
     if dataset_identity is not None:
         stats["dataset_identity"] = dataset_identity
         index["stats_sha256"] = json_hash(stats)
+    if allow_unannotated_episodes:
+        stats["unannotated_episodes"] = sorted(unannotated)
+        stats["unannotated_policy"] = "absent_source_episode_and_all_merged_slot_labels_null"
+        index["stats_sha256"] = json_hash(stats)
     report = {"episodes": len(mapping), "frames": rows_count, "anchors": len(anchors), "carried_labels_masked": rows_count - len(anchors),
               "splits": info["splits"], "slot_storage_types": dict(types), "fields": dict(fields), "schemas": dict(schemas), "cameras": dict(cameras),
               "coordinates": dict(coordinates), "fps": info["fps"], "anchor_valid_samples": dict(coverage), "full_frame_valid_samples": dict(full_coverage),
@@ -219,8 +236,12 @@ def audit_slot_geometry(dataset_root):
 
 
 class SlotSupervisionReader:
-    def __init__(self, directory):
+    def __init__(self, directory, *, audit_cache=None):
         root = Path(directory)
+        self.audit_cache = audit_cache
+        if audit_cache is not None:
+            for name in ("slot_supervision_stats.json", "slot_anchor_index.json"):
+                audit_cache.check(root / name)
         self.stats = json.loads((root / "slot_supervision_stats.json").read_text())
         index = json.loads((root / "slot_anchor_index.json").read_text())
         if index["stats_sha256"] != json_hash(self.stats):
@@ -238,6 +259,11 @@ class SlotSupervisionReader:
         if source_root is None:
             raise ValueError("Slot source annotations unavailable for anchor verification")
         self.source_root, self.source_hashes = source_root, index["source_hashes"]
+        self.unannotated = set(self.stats.get("unannotated_episodes", []))
+        if self.unannotated and (self.stats.get("unannotated_policy") != "absent_source_episode_and_all_merged_slot_labels_null"
+                or not self.unannotated <= self.mapping.keys()
+                or any(ep in self.unannotated for ep, _ in self.anchors)):
+            raise ValueError("invalid unannotated Slot episode contract")
         self.anchors_by_episode = {}
         for key in self.anchors:
             self.anchors_by_episode.setdefault(key[0], set()).add(key)
@@ -245,7 +271,7 @@ class SlotSupervisionReader:
             raise ValueError("Slot index contains non-anchor supervision")
         self.verified_episodes = OrderedDict()
         self.lazy_sources = index["version"] == 2
-        if self.lazy_sources:
+        if self.lazy_sources and audit_cache is None:
             from utils.aux_data_contract import digest_file
             expected = {"anchors_sha256": json_hash(index["anchors"]),
                         "mapping_sha256": digest_file(self.root / "meta/stage05_episode_mapping.jsonl"),
@@ -254,7 +280,7 @@ class SlotSupervisionReader:
                 raise ValueError("Slot anchor/mapping/source-root contract mismatch")
             if self.stats.get("index_implementation_identity") != slot_index_implementation_identity():
                 raise ValueError("Slot index implementation identity changed")
-        else:
+        elif not self.lazy_sources:
             for episode in self.mapping:
                 self._verify_source_episode(episode)
         self.cache = OrderedDict()
@@ -263,9 +289,19 @@ class SlotSupervisionReader:
         if episode in self.verified_episodes:
             self.verified_episodes.move_to_end(episode)
             return
+        if episode in self.unannotated:
+            source = self.source_root / f"episode_{int(self.mapping[episode]['old_episode_index']):06d}"
+            if source.exists():
+                raise ValueError(f"previously unannotated Slot source changed: {source}")
+            return
         path = _active_training_samples(self.source_root, int(self.mapping[episode]["old_episode_index"]))
         if path is None:
             raise ValueError(f"missing Slot source episode={episode}")
+        if self.audit_cache is not None:
+            if str(path) not in self.source_hashes:
+                raise ValueError(f"Slot source is absent from the saved alignment audit: {path}")
+            self.audit_cache.check(path, self.source_hashes[str(path)])
+            return
         content = path.read_bytes()
         if hashlib.sha256(content).hexdigest() != self.source_hashes.get(str(path)):
             raise ValueError(f"Slot source changed since audit: {path}")
@@ -288,9 +324,11 @@ class SlotSupervisionReader:
         if self.lazy_sources:
             self._verify_source_episode(episode)
         key = (episode, frame)
-        if key not in self.anchors:
+        if key not in self.anchors and episode not in self.unannotated:
             return normalize_slot_labels(None, is_anchor=False)
         path = self.root / self.mapping[episode]["source_data_uri"]
+        if self.audit_cache is not None:
+            self.audit_cache.check(path)
         if path not in self.cache:
             rows = pq.read_table(path, columns=["episode_index", "frame_index", "slot_data"]).to_pylist()
             self.cache[path] = {(r["episode_index"], r["frame_index"]): r["slot_data"] for r in rows}
@@ -298,6 +336,10 @@ class SlotSupervisionReader:
                 self.cache.popitem(last=False)
         raw = self.cache[path][key]
         parsed = json.loads(raw) if isinstance(raw, str) else raw
+        if episode in self.unannotated:
+            if parsed is not None:
+                raise ValueError(f"unannotated Slot labels changed: episode={episode} frame={frame}")
+            return normalize_slot_labels(None, is_anchor=False)
         identity = f"dataset={self.root.name} episode={episode} frame={frame}"
         if json_hash(parsed) != self.anchors[key]["sha256"]:
             raise ValueError(f"{identity}: Slot labels changed since alignment audit")
@@ -330,7 +372,8 @@ class SlotSupervisedDataset(torch.utils.data.Dataset):
             self.spec = replace(self.spec, auxiliary_contract=auxiliary)
         self.anchor_by_global = ({value["global_index"]: key for key, value in reader.anchors.items()}
                                  if dataset.loss_type == "aux" and self.matched and hasattr(dataset, "_episode_for_global") else {})
-        self.indices = range(len(dataset)) if dataset.loss_type != "aux" else []
+        cached_selection = bool(getattr(dataset, "frozen_index", False) and getattr(reader, "audit_cache", None) is not None)
+        self.indices = range(len(dataset)) if dataset.loss_type != "aux" or cached_selection else []
         flow_reader = getattr(dataset, "flow_reader", None)
         flow_eligible = set()
         if dataset.loss_type == "aux" and config.stage2_aux_sampling == "any_aux_valid" and flow_reader is not None:
@@ -338,7 +381,7 @@ class SlotSupervisedDataset(torch.utils.data.Dataset):
                 raise ValueError("Flow sampling requires its enabled configuration")
             from utils.aux_sampling import load_flow_candidates
             flow_eligible = set(load_flow_candidates(dataset).tolist())
-        for i in range(len(dataset)) if dataset.loss_type == "aux" else ():
+        for i in range(len(dataset)) if dataset.loss_type == "aux" and not cached_selection else ():
             ep, frame = self.identity(i)
             valid = self.matched and reader.anchors.get((ep, frame), {}).get("valid", False)
             if dataset.loss_type == "aux":
@@ -346,6 +389,8 @@ class SlotSupervisedDataset(torch.utils.data.Dataset):
                 if not valid and not (config.stage2_aux_sampling == "any_aux_valid" and flow_valid):
                     continue
             self.indices.append(i)
+        if getattr(dataset, "frozen_index", False) and len(self.indices) != len(dataset):
+            raise ValueError("Slot eligibility changed after stage index was frozen")
         if hasattr(reader, "stats"):
             auxiliary = dict(self.spec.auxiliary_contract)
             auxiliary["sampling"] = {"unfiltered_length": self.unfiltered_length, "filtered_length": len(self.indices)}

@@ -43,7 +43,11 @@ class OpticalFlowReader:
                     raise ValueError("manifest has no camera key")
             self.camera_key = camera_key
             for entry in entries:
-                episode = entry["merged_episode_index"]
+                source_episode = entry["merged_episode_index"]
+                remapping = contract.get("flow_to_dataset_episode") if contract else None
+                if remapping is not None and str(source_episode) not in remapping:
+                    raise ValueError("Flow manifest record is absent from verified remapping")
+                episode = remapping[str(source_episode)] if remapping is not None else source_episode
                 if not isinstance(episode, int) or episode < 0 or episode in self.episodes:
                     raise ValueError(f"duplicate/invalid episode {episode}")
                 if entry["camera_key"] != camera_key:
@@ -126,6 +130,8 @@ class OpticalFlowReader:
                 valid = (pooled >= min_valid_fraction).reshape(stop - start, -1).any(-1)
                 valid &= handle["actual_delta_frames"][start:stop] == self.delta_frames
                 valid &= handle["label_source"][start:stop] == 1
+                if self.contract and self.contract.get("excluded_frames"):
+                    valid &= ~np.isin(handle["frame_index"][start:stop], self.contract["excluded_frames"].get(str(episode), []))
                 eligible.update((episode, int(frame)) for frame in handle["frame_index"][start:stop][valid])
         return eligible
 
@@ -139,6 +145,10 @@ class OpticalFlowReader:
     def _handle(self, episode):
         import h5py
 
+        audit_cache = self.contract.get("audit_cache") if self.contract else None
+        if audit_cache is not None:
+            path, entry = self.episodes[episode]
+            audit_cache.check(path, entry["sha256"])
         if self._pid != os.getpid():
             self.close()
             self._pid = os.getpid()
@@ -147,7 +157,7 @@ class OpticalFlowReader:
             path, entry = self.episodes[episode]
             handle = h5py.File(path, "r")
             try:
-                frames = self._validate_structure(handle, entry)
+                frames = handle["frame_index"][:] if audit_cache is not None else self._validate_structure(handle, entry)
                 mapping = {(episode, int(frame)): row for row, frame in enumerate(frames)}
             except Exception:
                 handle.close()
@@ -180,6 +190,10 @@ class OpticalFlowReader:
             delta, source = int(handle["actual_delta_frames"][row]), int(handle["label_source"][row])
             result.update(flow_actual_delta_frames=torch.tensor(delta), flow_label_source=torch.tensor(source))
             result["flow_exclusion_reason"] = torch.tensor(2)
+            excluded = self.contract.get("excluded_frames", {}).get(str(episode), []) if self.contract else []
+            if int(frame) in excluded:
+                result["flow_exclusion_reason"] = torch.tensor(5)
+                return result
             if delta != self.delta_frames or source != 1:
                 return result
             flow, mask = handle["flow"][row].astype(np.float32), handle["valid_mask"][row]
