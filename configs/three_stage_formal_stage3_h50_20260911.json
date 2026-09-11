@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "enabled": true,
+  "allow_stage2_init": true,
+  "runtime_commit": "3eefb602417d3bd4b20bef2b47660b404aefb565",
+  "runtime_root": "/opt/data/private/lq/ZR-0/outputs/runtime_snapshots/3eefb602417d3bd4b20bef2b47660b404aefb565",
+  "source_experiment": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260909/commit_3eefb602_flow10",
+  "init_from_checkpoint": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260909/commit_3eefb602_flow10/recovery_checkpoints/stage2_aux/step-005000-attempt-000/latest-model-optimizer-lr",
+  "action_horizon": 50,
+  "max_train_steps": 150000,
+  "outer_weights": {"ar": 1.0, "slot": 0.1, "optical_flow": 1.0, "fm": 5.0},
+  "experiment": "stage3_from_stage2_step5000_h50_slot0p1_flow1_20260911",
+  "output_root": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260911/stage3_from_stage2_step5000_h50_slot0p1_flow1",
+  "wandb_project": "zr0-three-stage-formal",
+  "authorization": "User explicitly authorized a fresh Stage 3 from the preserved Stage 2 step-5000 checkpoint, horizon 50, AR + 0.1*Slot + Flow + 5*FM, and confirmed 150000 successful optimizer updates. Reuse saved audits, independent dataset statistics, pinned runtime, four GPUs, global batch 128 and required online W&B. Expert initialization only from fixed ZR-0 base. Existing automatic retry authorization applies with at most three retries. Preserve all previous checkpoints and stop after this stage."
+}

@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -15,8 +16,8 @@ import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+RUNTIME_ROOT = Path(os.environ.get("ZR0_RUNTIME_ROOT", REPO_ROOT)).resolve()
+sys.path[:0] = [str(RUNTIME_ROOT), str(RUNTIME_ROOT / "lerobot")]
 
 from scripts.record_query_pretrain_launch import (  # noqa: E402
     resolve_model_weight_identity,
@@ -43,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--world-size", type=int, required=True)
     parser.add_argument("--launcher", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--experiment", default="libero_wo_ecot_pt_dq32_tabletop_v3_joint_init")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     return parser.parse_args()
 
@@ -103,7 +105,8 @@ def main() -> None:
         command = command[1:]
     try:
         train_index = next(
-            index for index, token in enumerate(command) if token.endswith("/train_vla.py")
+            index for index, token in enumerate(command)
+            if Path(token).name in {"train_vla.py", "train_libero_finetune.py"}
         )
     except StopIteration as error:
         raise ValueError("launch command does not contain train_vla.py") from error
@@ -188,7 +191,8 @@ def main() -> None:
     staged_diff = git_output("diff", "--cached", "--binary", binary=True)
     record = {
         "version": 1,
-        "experiment": "libero_wo_ecot_pt_dq32_tabletop_v3_joint_init",
+        "experiment": args.experiment,
+        "runtime_root": str(RUNTIME_ROOT),
         "run_mode": args.run_mode,
         "git_head": git_output("rev-parse", "HEAD").strip(),
         "git_status_porcelain": git_output("status", "--porcelain=v1").splitlines(),
@@ -229,7 +233,8 @@ def main() -> None:
         json.dumps(record, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    print(json.dumps(record, ensure_ascii=True, sort_keys=True))
+    print(json.dumps({"launch_manifest": str(args.output), "batch_contract": contract,
+                      "dataset_manifest_sha256": dataset_manifest["content_hash"]}, sort_keys=True))
 
 
 if __name__ == "__main__":

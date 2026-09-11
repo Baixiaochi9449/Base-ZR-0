@@ -4,6 +4,7 @@ export PYTHONNOUSERSITE=1
 export CUDA_VISIBLE_DEVICES="${ZR0_CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+RUNTIME_ROOT=${ZR0_RUNTIME_ROOT:-$ROOT_DIR}
 PYTHON_BIN=${ZR0_TRAIN_PYTHON:-/opt/data/private/lq/miniconda3/envs/ZR-0/bin/python}
 MODEL_PATH=/opt/data/private/lq/models/Qwen3-VL-2B-Instruct
 PRETRAIN_JOINT_CKPT=${ZR0_PRETRAIN_JOINT_CKPT:-"$ROOT_DIR/outputs/pretrain/tabletop_v3_dq32_joint_gbs128_seed42_mbs16_gas2/step-19424"}
@@ -19,6 +20,7 @@ EXPECTED_SOURCE_ACTION_HORIZON=
 EXPECTED_NUM_DIFFERENCE_QUERIES=
 REFERENCE_ACTION_EXPERT_CONFIG=
 USE_EXPLICIT_LIBERO_BATCH_CONTRACT=0
+USE_PRETRAINED_CHECKPOINT=0
 LIBERO_ACTION_HORIZON=${ZR0_LIBERO_ACTION_HORIZON:-10}
 EXPERIMENT_ARM=${2:-baseline_fa2}
 case "$EXPERIMENT_ARM" in
@@ -35,6 +37,7 @@ case "$EXPERIMENT_ARM" in
         WANDB_GROUP=libero-wo-ecot-pt-difference-query
         ;;
     difference_query_pretrained)
+        USE_PRETRAINED_CHECKPOINT=1
         ARM_SUFFIX=FinalRMSNorm-difference-query-nq32-tabletop-v3-joint-init
         WANDB_GROUP=libero-wo-ecot-pt-difference-query-tabletop-v3-joint-init
         ACCELERATE_CONFIG="$ROOT_DIR/accelerate_configs/libero_zero2_bf16_mbs16_gas1.yaml"
@@ -48,11 +51,29 @@ case "$EXPERIMENT_ARM" in
         REFERENCE_ACTION_EXPERT_CONFIG="$PRETRAIN_JOINT_CKPT/action_expert_config.json"
         USE_EXPLICIT_LIBERO_BATCH_CONTRACT=1
         ;;
+    difference_query_stage3)
+        USE_PRETRAINED_CHECKPOINT=1
+        USE_EXPLICIT_LIBERO_BATCH_CONTRACT=1
+        ARM_SUFFIX=stage3-step14000-action-only-dq32
+        WANDB_GROUP=libero-stage3-step14000-action-only-dq32-seed42
+        RUNTIME_ROOT=${ZR0_RUNTIME_ROOT:-"$ROOT_DIR/outputs/runtime_snapshots/3eefb602417d3bd4b20bef2b47660b404aefb565"}
+        PRETRAIN_JOINT_CKPT=${ZR0_PRETRAIN_JOINT_CKPT:-"$ROOT_DIR/outputs/three_stage_formal_20260910/stage3_resume8000_slot05_flow5/recovery_checkpoints/stage3_joint/step-014000-attempt-000/latest-model-optimizer-lr"}
+        INITIAL_MODEL_PATH="$PRETRAIN_JOINT_CKPT"
+        INITIAL_ACTION_EXPERT_PATH="$PRETRAIN_JOINT_CKPT"
+        REFERENCE_ACTION_EXPERT_CONFIG="$PRETRAIN_JOINT_CKPT/action_expert_config.json"
+        EXPECTED_CHECKPOINT_KIND=joint
+        EXPECTED_NUM_DIFFERENCE_QUERIES=32
+        ACCELERATE_CONFIG="$ROOT_DIR/accelerate_configs/libero_zero2_bf16_mbs16_gas1.yaml"
+        EXPERIMENT_TEMPLATE="$ROOT_DIR/docs/experiments/libero_stage3_step14000/experiment.md"
+        ZR0_OUTPUT_DIR=${ZR0_OUTPUT_DIR:-"$ROOT_DIR/outputs/ckpts/ZR0-stage3-step14000-LIBERO-action-only-dq32-h10-gbs64-seed42"}
+        ;;
     *)
         echo "Unknown experiment arm: $EXPERIMENT_ARM" >&2
         exit 2
         ;;
 esac
+export ZR0_RUNTIME_ROOT="$RUNTIME_ROOT"
+export PYTHONPATH="$RUNTIME_ROOT:$RUNTIME_ROOT/lerobot${PYTHONPATH:+:$PYTHONPATH}"
 OUTPUT_DIR=${ZR0_OUTPUT_DIR:-"$ROOT_DIR/outputs/ckpts/Qwen3-VL-2B-Instruct-LIBERO-wo-ECoT-PT-$ARM_SUFFIX"}
 EXPERIMENT_DOC="$OUTPUT_DIR/experiment.md"
 LOG_BASE_DIR="$ROOT_DIR/outputs/train_logs/Qwen3-VL-2B-Instruct-LIBERO-wo-ECoT-PT-$ARM_SUFFIX"
@@ -60,12 +81,12 @@ WANDB_LOCAL_DIR="$ROOT_DIR/outputs/wandb"
 WANDB_PROJECT=ZR-0-LIBERO
 SAVE_STEP_INTERVAL=${ZR0_SAVE_STEP_INTERVAL:-2000}
 MAX_TRAIN_STEPS=${ZR0_MAX_TRAIN_STEPS:-}
-RESUME_CKPT="$OUTPUT_DIR/latest-model-optimizer-lr"
+RESUME_CKPT=${ZR0_RESUME_CKPT:-"$OUTPUT_DIR/latest-model-optimizer-lr"}
 WANDB_RUN_ID_FILE="$OUTPUT_DIR/.wandb-run-id"
 WANDB_RUN_NAME_FILE="$OUTPUT_DIR/.wandb-run-name"
 
 usage() {
-    echo "Usage: $0 {preflight|train|resume} [baseline_fa2|baseline_sdpa|difference_query|difference_query_pretrained]" >&2
+    echo "Usage: $0 {preflight|train|resume} [baseline_fa2|baseline_sdpa|difference_query|difference_query_pretrained|difference_query_stage3]" >&2
 }
 
 print_command() {
@@ -76,8 +97,12 @@ print_command() {
 }
 
 run_preflight() {
+    local preflight_python=python
+    if [[ "$EXPERIMENT_ARM" == "difference_query_stage3" ]]; then
+        preflight_python="$PYTHON_BIN"
+    fi
     local args=(
-        python "$ROOT_DIR/scripts/preflight_libero_wo_ecot_pt.py"
+        "$preflight_python" "$RUNTIME_ROOT/scripts/preflight_libero_wo_ecot_pt.py"
         --model-path "$MODEL_INPUT_PATH"
         --fast-path "$FAST_PATH" \
         --dataset-path "$DATASET_PATH" \
@@ -85,7 +110,7 @@ run_preflight() {
         --min-gpu-free-gib 70 \
         --require-wandb
     )
-    if [[ "$EXPERIMENT_ARM" == "difference_query_pretrained" ]]; then
+    if [[ "$USE_PRETRAINED_CHECKPOINT" == "1" ]]; then
         args+=(--output-path "$OUTPUT_DIR" --min-output-free-gib 200)
     fi
     if [[ -n "$EXPECTED_CHECKPOINT_KIND" ]]; then
@@ -104,7 +129,9 @@ run_preflight() {
 }
 
 validate_checkpoint_for_training() {
-    if [[ "$EXPERIMENT_ARM" != "difference_query_pretrained" ]]; then
+    if [[ "$USE_PRETRAINED_CHECKPOINT" != "1" || "$EXPERIMENT_ARM" == "difference_query_stage3" ]]; then
+        # The Stage 3 arm performs this check once in run_preflight. Dry-run
+        # expands configuration without loading checkpoint tensor payloads.
         return
     fi
     if [[ ! -d "$MODEL_INPUT_PATH" ]]; then
@@ -169,13 +196,13 @@ ACTION_EXPERT_INPUT_PATH="$INITIAL_ACTION_EXPERT_PATH"
 if [[ "$mode" == "resume" ]]; then
     MODEL_INPUT_PATH="$RESUME_CKPT"
     ACTION_EXPERT_INPUT_PATH="$RESUME_CKPT"
-    if [[ "$EXPERIMENT_ARM" == "difference_query_pretrained" ]]; then
+    if [[ "$USE_PRETRAINED_CHECKPOINT" == "1" ]]; then
         EXPECTED_CHECKPOINT_KIND=action_only
         EXPECTED_SOURCE_ACTION_HORIZON="$LIBERO_ACTION_HORIZON"
     fi
 fi
 
-if [[ "$EXPERIMENT_ARM" == "difference_query_pretrained" && "$mode" != "resume" ]]; then
+if [[ "$USE_PRETRAINED_CHECKPOINT" == "1" && "$mode" != "resume" ]]; then
     [[ -f "$MODEL_INPUT_PATH/action_expert_config.json" ]] || {
         echo "missing legacy Joint Action Expert config: $MODEL_INPUT_PATH/action_expert_config.json" >&2
         exit 1
@@ -199,13 +226,15 @@ if [[ "$mode" == "resume" ]]; then
     WANDB_RUN_ID=${ZR0_WANDB_RUN_ID:-$(cat "$WANDB_RUN_ID_FILE" 2>/dev/null || true)}
     WANDB_RESUME=must
 else
-    if [[ "$EXPERIMENT_ARM" == "difference_query_pretrained" ]]; then
+    if [[ "$EXPERIMENT_ARM" == "difference_query_stage3" ]]; then
+        default_run_name=zr0-stage3-step14000-libero-dq32-seed42-$(date +%Y%m%d-%H%M%S)
+    elif [[ "$EXPERIMENT_ARM" == "difference_query_pretrained" ]]; then
         default_run_name=qwen3vl2b-libero-wo-ecot-dq32-tabletop-v3-joint-init-seed42-$(date +%Y%m%d-%H%M%S)
     else
         default_run_name=qwen3vl2b-libero-wo-ecot-pt-seed42-$(date +%Y%m%d-%H%M%S)
     fi
     RUN_NAME=${ZR0_RUN_NAME:-$default_run_name}
-    WANDB_RUN_ID=${ZR0_WANDB_RUN_ID:-$(python -c 'import secrets, string; alphabet = string.ascii_lowercase + string.digits; print("".join(secrets.choice(alphabet) for _ in range(8)))')}
+    WANDB_RUN_ID=${ZR0_WANDB_RUN_ID:-$("$PYTHON_BIN" -c 'import secrets, string; alphabet = string.ascii_lowercase + string.digits; print("".join(secrets.choice(alphabet) for _ in range(8)))')}
     WANDB_RESUME=never
 fi
 
@@ -215,12 +244,16 @@ if [[ -z "$RUN_NAME" || -z "$WANDB_RUN_ID" ]]; then
 fi
 
 LOG_DIR="$LOG_BASE_DIR/$RUN_NAME"
+TRAIN_ENTRY="$RUNTIME_ROOT/train_vla.py"
+if [[ "$EXPERIMENT_ARM" == "difference_query_stage3" ]]; then
+    TRAIN_ENTRY="$ROOT_DIR/scripts/train_libero_finetune.py"
+fi
 
 train_args=(
     accelerate launch
     --num_processes 4
     --config_file "$ACCELERATE_CONFIG"
-    "$ROOT_DIR/train_vla.py"
+    "$TRAIN_ENTRY"
     --vlm_name_or_path "$MODEL_INPUT_PATH"
     --FAST_tokenizer_path "$FAST_PATH"
     --per_device_train_batch_size 16
@@ -251,7 +284,7 @@ train_args=(
     --wandb_tags ablation wo-ecot-pt libero-v21 qwen3-vl-2b "$EXPERIMENT_ARM"
 )
 
-if [[ "$EXPERIMENT_ARM" == "difference_query_pretrained" ]]; then
+if [[ "$USE_PRETRAINED_CHECKPOINT" == "1" ]]; then
     # This is a new downstream initialization from the completed Stage05 Joint
     # checkpoint; it is not a resume and must load the pretrained Expert.
     train_args+=(
@@ -262,6 +295,10 @@ if [[ "$EXPERIMENT_ARM" == "difference_query_pretrained" ]]; then
             --action_expert_config_path "$PRETRAIN_JOINT_CKPT/action_expert_config.json"
         )
     fi
+fi
+
+if [[ "$EXPERIMENT_ARM" == "difference_query_stage3" ]]; then
+    train_args+=(--vlm_loss_weight 0.0 --slot_loss_weight 0.0 --optical_flow_loss_weight 0.0)
 fi
 
 if [[ "$USE_EXPLICIT_LIBERO_BATCH_CONTRACT" == "1" ]]; then
@@ -286,7 +323,7 @@ case "$EXPERIMENT_ARM" in
     baseline_sdpa)
         train_args+=(--vlm_attention_backend sdpa)
         ;;
-    difference_query|difference_query_pretrained)
+    difference_query|difference_query_pretrained|difference_query_stage3)
         train_args+=(
             --use_difference_query
             --num_difference_queries 32
@@ -332,10 +369,15 @@ write_experiment_record() {
 }
 
 write_launch_manifest() {
-    if [[ "$EXPERIMENT_ARM" != "difference_query_pretrained" ]]; then
+    if [[ "$USE_PRETRAINED_CHECKPOINT" != "1" ]]; then
         return
     fi
-    python "$ROOT_DIR/scripts/record_libero_finetune_launch.py" \
+    local manifest_args=()
+    if [[ "$EXPERIMENT_ARM" == "difference_query_stage3" ]]; then
+        manifest_args+=(--experiment "$EXPERIMENT_ARM")
+    fi
+    "$PYTHON_BIN" "$ROOT_DIR/scripts/record_libero_finetune_launch.py" \
+        "${manifest_args[@]}" \
         --run-mode "$mode" \
         --world-size 4 \
         --launcher "$0" \
@@ -351,7 +393,7 @@ fi
 
 validate_explicit_batch_config
 run_preflight
-cd "$ROOT_DIR"
+cd "$RUNTIME_ROOT"
 
 if [[ "$mode" == "train" && -e "$OUTPUT_DIR" ]]; then
     echo "Refusing to overwrite existing output directory: $OUTPUT_DIR" >&2
@@ -365,7 +407,7 @@ if [[ "$mode" == "resume" ]]; then
     fi
 fi
 
-if [[ "$mode" == "train" ]]; then
+if [[ "$mode" == "train" || ( "$EXPERIMENT_ARM" == "difference_query_stage3" && ! -e "$OUTPUT_DIR" ) ]]; then
     mkdir -p "$OUTPUT_DIR"
     printf '%s\n' "$WANDB_RUN_ID" > "$WANDB_RUN_ID_FILE"
     printf '%s\n' "$RUN_NAME" > "$WANDB_RUN_NAME_FILE"

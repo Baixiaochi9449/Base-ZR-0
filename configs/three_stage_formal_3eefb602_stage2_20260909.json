@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "preparation_config": "/opt/data/private/lq/ZR-0/configs/three_stage_validation_20260908.json",
+  "experiment": "three_stage_formal_20260909",
+  "output_root": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260909/commit_3eefb602_stage2",
+  "wandb_project": "zr0-three-stage-formal",
+  "stage_updates": [10000, 5000, 150000],
+  "runtime_commit": "3eefb602417d3bd4b20bef2b47660b404aefb565",
+  "runtime_root": "/opt/data/private/lq/ZR-0/outputs/runtime_snapshots/3eefb602417d3bd4b20bef2b47660b404aefb565",
+  "completed_stage1_checkpoint": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260909/speed_resume_local_scalars_3000/recovery_checkpoints/stage1_ar/step-010000-stage1_ar/latest-model-optimizer-lr",
+  "authorization": "User explicitly requested commit 3eefb602417d3bd4b20bef2b47660b404aefb565 and Stage 2 startup. Preserve the completed 10000-update Stage 1 and continue Stage 2 for 5000 updates, followed by the previously authorized 150000-update Stage 3. Retain four GPUs, batch 128, required online W&B, existing source audit, component inheritance and authorized automatic retries. Preserve all working-tree changes without checkout, staging or commit."
+}

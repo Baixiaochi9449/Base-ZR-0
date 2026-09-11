@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "preparation_config": "/opt/data/private/lq/ZR-0/configs/three_stage_validation_20260908.json",
+  "experiment": "three_stage_formal_flow10_20260909",
+  "output_root": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260909/commit_3eefb602_flow10",
+  "wandb_project": "zr0-three-stage-formal",
+  "stage_updates": [10000, 5000, 150000],
+  "runtime_commit": "3eefb602417d3bd4b20bef2b47660b404aefb565",
+  "runtime_root": "/opt/data/private/lq/ZR-0/outputs/runtime_snapshots/3eefb602417d3bd4b20bef2b47660b404aefb565",
+  "completed_stage1_checkpoint": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260909/speed_resume_local_scalars_3000/recovery_checkpoints/stage1_ar/step-010000-stage1_ar/latest-model-optimizer-lr",
+  "lambda_optical_flow": {
+    "stage1_ar": 0.0,
+    "stage2_aux": 10.0,
+    "stage3_joint": 10.0
+  },
+  "authorization": "User explicitly authorized preserving the previous Stage 2 step-1000 checkpoint unchanged and restarting Stage 2 from step zero. Use commit 3eefb602417d3bd4b20bef2b47660b404aefb565 with Optical Flow outer weights 0/10/10. Initialize Stage 2 VLM/Query from the completed Stage 1 step-10000 checkpoint, freshly initialize auxiliary Heads and optimizer/scheduler, and train 5000 successful updates in separate outputs. Stage 3 retains the previously authorized 150000-update schedule with AR + Slot + 10*Flow + 5*FM and base-only Action Expert initialization. Preserve all earlier artifacts, frozen source audits, internal coefficients, worktree changes and Git index; keep four GPUs, batch 128, required online W&B and the authorized automatic retry policy."
+}

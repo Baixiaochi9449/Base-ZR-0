@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "enabled": true,
+  "runtime_commit": "3eefb602417d3bd4b20bef2b47660b404aefb565",
+  "runtime_root": "/opt/data/private/lq/ZR-0/outputs/runtime_snapshots/3eefb602417d3bd4b20bef2b47660b404aefb565",
+  "source_experiment": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260910/stage3_resume8000_slot05_flow5",
+  "resume_from_checkpoint": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260910/stage3_resume8000_slot05_flow5/recovery_checkpoints/stage3_joint/step-014000-attempt-000/latest-model-optimizer-lr",
+  "resume_step": 14000,
+  "max_train_steps": 150000,
+  "output_root": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260910/stage3_resume14000_slot0p1_flow1_after_libero",
+  "experiment": "stage3_resume14000_slot0p1_flow1_after_libero_20260911",
+  "wandb_project": "zr0-three-stage-formal",
+  "outer_weights": {"ar": 1.0, "slot": 0.1, "optical_flow": 1.0, "fm": 5.0},
+  "predecessor": {
+    "output_root": "/opt/data/private/lq/ZR-0/outputs/ckpts/ZR0-stage3-step14000-LIBERO-action-only-dq32-h10-gbs64-seed42",
+    "target_updates": 34184,
+    "supervisor_pid": 1918552,
+    "poll_seconds": 15
+  },
+  "startup_verify_updates": 20,
+  "authorization": "User explicitly requested monitoring the current LIBERO training and immediately starting a new Stage 3 resume from the original complete step-14000 checkpoint after LIBERO finishes, with AR + 0.1*Slot + 1*OpticalFlow + 5*FM. Retain the original cumulative target of 150000 updates, full same-stage training state, pinned 3eefb602 runtime, four GPUs, global batch 128, independent dataset statistics, cached audit and online W&B. Preserve original checkpoints. Previously authorized automatic retries remain enabled, bounded to three retries."
+}

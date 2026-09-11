@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "enabled": true,
+  "runtime_commit": "3eefb602417d3bd4b20bef2b47660b404aefb565",
+  "runtime_root": "/opt/data/private/lq/ZR-0/outputs/runtime_snapshots/3eefb602417d3bd4b20bef2b47660b404aefb565",
+  "source_experiment": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260909/commit_3eefb602_flow10",
+  "resume_from_checkpoint": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260909/commit_3eefb602_flow10/recovery_checkpoints/stage3_joint/step-008000-attempt-000/latest-model-optimizer-lr",
+  "resume_step": 8000,
+  "max_train_steps": 150000,
+  "output_root": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260910/stage3_resume8000_slot05_flow5",
+  "experiment": "stage3_resume8000_slot05_flow5_20260910",
+  "wandb_project": "zr0-three-stage-formal",
+  "outer_weights": {"ar": 1.0, "slot": 0.5, "optical_flow": 5.0, "fm": 5.0},
+  "authorization": "User requested stopping after the complete Stage 3 step-8000 checkpoint, changing the objective to AR + 0.5*Slot + 5*OpticalFlow + 5*FM, then resuming from step 8000. Preserve the original checkpoint and all historical outputs. Resume model, Action Expert, optimizer, scheduler, RNG, sampler cursor and exposure from that checkpoint, retaining the 150000 total Stage 3 update target, four GPUs and global batch 128. Reuse the existing data audit. Online W&B and the previously authorized automatic retries remain required."
+}

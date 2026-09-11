@@ -25,6 +25,34 @@ def load_preflight_module():
 
 
 class LiberoWoEcotPtLauncherTest(unittest.TestCase):
+    def test_stage3_downstream_uses_same_source_and_fresh_action_only_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source-14000"
+            source.mkdir()
+            (source / "action_expert_config.json").write_text(json.dumps({"action_horizon": 10}))
+            result = self.run_launcher("train", arm="difference_query_stage3", extra_env={
+                "ZR0_PRETRAIN_JOINT_CKPT": str(source), "ZR0_OUTPUT_DIR": str(Path(directory) / "new")})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        command = shlex.split(result.stdout)
+        for flag in ("--vlm_name_or_path", "--action_expert_name_or_path"):
+            self.assertEqual(command[command.index(flag) + 1], str(source))
+        for flag in ("--vlm_loss_weight", "--slot_loss_weight", "--optical_flow_loss_weight"):
+            self.assertEqual(command[command.index(flag) + 1], "0.0")
+        self.assertEqual(command[command.index("--expected_global_batch_size") + 1], "64")
+        self.assertIn(str(ROOT / "scripts/train_libero_finetune.py"), command)
+        for flag in ("--resume_training", "--training_stage", "--component_optimizer_groups",
+                     "--init_from_checkpoint", "--resume_from_checkpoint"):
+            self.assertNotIn(flag, command)
+
+    def test_stage3_retry_can_use_own_archive_in_separate_output(self):
+        result = self.run_launcher("resume", arm="difference_query_stage3", extra_env={
+            "ZR0_RESUME_CKPT": "/libero-own/recovery/step-002000/latest-model-optimizer-lr",
+            "ZR0_OUTPUT_DIR": "/libero-own/attempt-001"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--resume_training", result.stdout)
+        self.assertIn("--wandb_resume must", result.stdout)
+        self.assertIn("--vlm_name_or_path /libero-own/recovery/step-002000/latest-model-optimizer-lr", result.stdout)
+
     def run_launcher(
         self,
         mode: str,
