@@ -1,4 +1,5 @@
 from transformers.feature_extraction_utils import BatchFeature
+from dataclasses import replace
 from .qwen_vl_backbone import QwenVLBackbone
 from torch import nn
 from typing import Tuple
@@ -103,6 +104,7 @@ class ZR0Model(nn.Module):
             slot_config=None,
             slot_supervision_stats=None,
             optical_flow_config=None,
+            flow_target_device=None,
             init_from_checkpoint=None,
             resume_from_checkpoint=None,
             action_expert_init_seed=42,
@@ -411,12 +413,27 @@ class ZR0Model(nn.Module):
                     torch.random.default_generator.manual_seed(action_expert_init_seed)
                     self.action_expert = FlowmatchingActionHead(self.action_expert_config, tune_action_expert)
         self.optical_flow_aux = None
+        self.flow_target_builder = None
         self.slot_aux = None
         if training_stage is not None:
             before = {"vlm": module_checksum(self.backbone.model),
                       "query": module_checksum(self.backbone.difference_query) if self.use_difference_query else None}
-            self.optical_flow_aux = build_optical_flow_head(actual_vlm_hidden_size, self.optical_flow_config)
+            latent_shape = None
+            if self.optical_flow_config.optical_flow_aux_type == "wan_vae_latent_v2":
+                from utils.optical_flow_v2 import WanFlowTargetBuilder
+                self.flow_target_builder = WanFlowTargetBuilder(
+                    self.optical_flow_config,
+                    device=(flow_target_device if flow_target_device is not None
+                            else next(self.backbone.model.parameters()).device),
+                )
+                latent_shape = self.flow_target_builder.latent_shape
+                self.optical_flow_config = replace(
+                    self.optical_flow_config, flow_latent_shape=latent_shape).validate()
+            self.optical_flow_aux = build_optical_flow_head(actual_vlm_hidden_size, self.optical_flow_config, latent_shape)
             if self.optical_flow_config.enabled:
+                if self.optical_flow_config.optical_flow_aux_type == "wan_vae_latent_v2":
+                    from utils.optical_flow_checkpoint import validate_v2_runtime_payload
+                    validate_v2_runtime_payload(flow_payload, self.flow_target_builder, self.optical_flow_aux)
                 load_flow_weights(self.optical_flow_aux, vlm_name_or_path, flow_payload)
             if self.slot_config.enabled:
                 from model.structured_slot_head import build_slot_head
@@ -429,7 +446,9 @@ class ZR0Model(nn.Module):
             if before != after:
                 raise RuntimeError("auxiliary initialization changed VLM/Query")
             self.aux_initialization = {"source": str(vlm_name_or_path), "before": before, "after": after,
-                                       "flow_source": "checkpoint" if flow_payload and flow_payload["config"]["optical_flow_aux_type"] != "none" else "random",
+                                       "flow_source": "checkpoint" if flow_payload and
+                                           flow_payload["config"]["optical_flow_aux_type"] != "none" and
+                                           not flow_payload.get("replace_flow_head") else "random",
                                        "action_expert_source": action_expert_name_or_path or "random_or_absent",
                                        "action_expert_init_seed": action_expert_init_seed}
             print(self.stage_description)
@@ -831,7 +850,8 @@ class ZR0Model(nn.Module):
         if getattr(self, "optical_flow_aux", None) is not None:
             from utils.optical_flow_loss import optical_flow_loss
             prediction = self.optical_flow_aux(backbone_outputs["backbone_embeddings"][:, -self.optical_flow_config.num_flow_queries:, :])
-            flow_outputs = optical_flow_loss(prediction, batch_inputs, self.optical_flow_config)
+            flow_outputs = optical_flow_loss(prediction, batch_inputs, self.optical_flow_config,
+                                             target_builder=getattr(self, "flow_target_builder", None))
         if resolved_loss_type == "aux":
             weighted = backbone_outputs["backbone_embeddings"].sum() * 0
             if flow_outputs is not None:

@@ -207,3 +207,185 @@ changes or the DeepSpeed optimizer wrapper's no-overflow fallback.
 CPU AMP and Gloo validation does not establish GPU/NCCL or DeepSpeed dynamic
 save/resume correctness. ZeRO-3 remains unsupported; real ZeRO-2 and GPU/NCCL
 smoke still require separate execution. No formal training is started here.
+
+## Wan VAE Latent V2
+
+Select V2 with the existing `--optical_flow_aux_type wan_vae_latent_v2` switch.
+It additionally requires an explicit `--flow_vae_model_path`, a locked positive
+`--flow_color_scale`, delta/source/valid-fraction rules and enabled Difference
+Query. `none`, Query-off and `dense_regression_v1` do not additionally import the
+V2 target module, parse a Wan path, instantiate `AutoencoderKLWan` or access a V2
+cache; the existing Action Expert has its own Diffusers dependency, and V1 retains
+its existing HDF5 label reads. Action inference validates the
+checkpoint sidecar but omits the Adapter and never resolves the VAE path.
+
+The online builder loads only `AutoencoderKLWan`, freezes it in eval mode and
+uses deterministic `latent_dist.mode()`. RGB `[B,3,1,224,224]` is transformed
+from `[0,1]` to `[-1,1]`; the result is normalized by the VAE's 48 saved means
+and standard deviations. The downloaded Wan2.2 VAE measures
+`[B,48,1,14,14]`; any `Tz != 1` fails. Decoder, RGB loss, EPE, KL and diffusion
+loss are absent from training. The Adapter predicts `[B,48,14,14]` from only
+the final `num_flow_queries`; its default 2048-to-256, two-layer, four-head
+configuration has 2,172,208 parameters.
+
+V2 loss is the global mean of per-sample FP32 latent-element MSE. One selector
+applies availability, per-source nominal/configured delta, label source and
+whole-mask valid fraction to the loss, activity check, metrics and distributed
+denominator. A globally empty OF-only accumulation window clears gradients and
+does not update AdamW, scheduler, successful step or stage history. Joint AR/FM
+supervision still updates when V2 has no eligible sample.
+
+First create one immutable training-split calibration file. This is a deliberate
+offline operation and was not run during the implementation review:
+
+```sh
+PYTHONNOUSERSITE=1 PYTHONPATH=. \
+/opt/data/private/lq/miniconda3/envs/ZR-0/bin/python \
+  scripts/calibrate_flow_color_scale.py \
+  --root /opt/data/private/lq/datasets/molmoact_dataset_tabletop-v3_stage05/stage06_flow/molmoact_tabletop \
+  --manifest /opt/data/private/lq/datasets/molmoact_dataset_tabletop-v3_stage05/stage06_flow/molmoact_tabletop/manifest.f61339e88e1b99c9.jsonl \
+  --dataset-root /opt/data/private/lq/datasets/molmoact_dataset_tabletop-v3_stage05 \
+  --output '<INDEPENDENT_CACHE_ROOT>/flow_color_calibration.train.json' \
+  --split train --expected-actual-delta 20 --label-source 1 \
+  --training-index '<MANIFEST_BOUND_TRAIN_FRAME_INDEX_JSON>' \
+  --min-valid-fraction 0.95 --quantile 0.99 \
+  --reservoir-capacity 1000000 --seed 42
+```
+
+The required training index is a version-1 JSON split contract with `split=train`,
+`selection=explicit_episode_frame_allowlist`, the Flow manifest SHA256, exact
+dataset/camera lists, and explicit `{episode, frame}` rows. `--dataset-root`
+binds that allowlist to the dataset's hashed `meta/info.json` split ranges and
+hashed `meta/stage05_episode_mapping.jsonl`; `meta/stage05_merge.json` binds the
+manifest dataset ID to that source. Each Flow `source_episode_index` is
+mapped through the authoritative old-to-new episode map before train membership
+is accepted; Flow and dataset episode IDs are not assumed equal. The authority
+must assign every episode exactly once, so an incomplete split sidecar is
+rejected. The script
+rejects validation/test rows, missing authority metadata, mapping conflicts and
+out-of-range rows. For a dataset with no verifiable split metadata, the only
+fallback is the explicit `--externally-trusted-training-index` flag; its output
+states `training_membership=not_independently_verified` and must not be described
+as independently leakage-checked.
+In independently verified mode, `meta/info.json` must declare every manifest
+camera as an image/video feature and `meta/modality.json` must include it in the
+published video contract. The mapping's `source_data_uri` is resolved relative to
+the dataset root (absolute URIs are accepted only when their resolved target is
+still inside that root), must be an existing Parquet file, and is checked against
+the compact `meta/episodes` sidecar. The actual Parquet `episode_index` metadata
+must cover the mapped Stage05 target episode and the sidecar row count; one
+Parquet file may therefore legitimately serve several mapped episodes. On first
+use of a unique source file, the verifier reads only its `episode_index` column
+in fixed-size batches and compares per-episode counts with the sidecar; it does
+not decode image/state/action columns. Resolved
+source paths, file sizes, source/target episode identities, camera feature shape
+and the modality digest are recorded in the calibration authority contract.
+Missing, external, symlink-escaped or identity-conflicting sources fail closed.
+It uses a uniform fixed-capacity reservoir and reports that its quantile is
+estimated. Output includes the split-contract/index hashes, included frame range,
+units, sample and observed counts, seed, filter funnel, coverage and truncation
+estimate. It refuses to overwrite an existing output. Validation/test jobs must
+read the locked `flow_color_scale` from this train result.
+
+Calibration validates each HDF5 block before filtering it. The raw `valid_mask`
+must contain only 0/1 values, `valid_fraction` must be finite, in range and agree
+with the mask mean, and all flow values in the block must be finite. These checks
+cover tail and nonmatching `actual_delta_frames`/`label_source` rows. Only then
+are train, full-delta, label-source and minimum-valid-fraction filters applied.
+
+```json
+{
+  "version": 1,
+  "split": "train",
+  "selection": "explicit_episode_frame_allowlist",
+  "flow_manifest_sha256": "<SHA256>",
+  "dataset_ids": ["molmoact_tabletop"],
+  "cameras": ["first_view"],
+  "frames": [{"episode": 0, "frame": 0}]
+}
+```
+
+For a bounded cache smoke, substitute that locked scale and encode only the
+requested number of samples. The cache directory must be separate from labels:
+
+```sh
+PYTHONNOUSERSITE=1 PYTHONPATH=. \
+/opt/data/private/lq/miniconda3/envs/ZR-0/bin/python \
+  scripts/build_flow_latent_cache.py \
+  --root /opt/data/private/lq/datasets/molmoact_dataset_tabletop-v3_stage05/stage06_flow/molmoact_tabletop \
+  --manifest /opt/data/private/lq/datasets/molmoact_dataset_tabletop-v3_stage05/stage06_flow/molmoact_tabletop/manifest.f61339e88e1b99c9.jsonl \
+  --vae-model-path /opt/data/private/lq/models/Wan2.2-TI2V-5B-Diffusers \
+  --scale '<LOCKED_TRAIN_SCALE>' --expected-actual-delta 20 --label-source 1 \
+  --min-valid-fraction 0.95 --cache-dtype float32 --limit 8 \
+  --output '<INDEPENDENT_CACHE_ROOT>/wan_v2_latents'
+```
+
+The following stage-2 template is complete after replacing the uppercase path
+placeholders and locked scale. It is documentation only and was not launched:
+
+```sh
+PYTHONNOUSERSITE=1 PYTHONPATH=. \
+/opt/data/private/lq/miniconda3/envs/ZR-0/bin/accelerate launch \
+  --config_file '<ZERO2_ACCELERATE_CONFIG>' --num_processes 4 \
+  --mixed_precision bf16 --gradient_accumulation_steps 2 train_vla.py \
+  --training_stage stage2_aux --loss_type aux \
+  --vlm_name_or_path '<STAGE1_CHECKPOINT>' \
+  --init_from_checkpoint '<STAGE1_CHECKPOINT>' \
+  --action_expert_config_path '<STAGE1_CHECKPOINT>/action_expert_config.json' \
+  --use_difference_query --num_difference_queries 32 --num_flow_queries 16 \
+  --optical_flow_aux_type wan_vae_latent_v2 --optical_flow_loss_weight 1.0 \
+  --flow_vae_model_path /opt/data/private/lq/models/Wan2.2-TI2V-5B-Diffusers \
+  --flow_color_scale '<LOCKED_TRAIN_SCALE>' --flow_delta_frames 20 \
+  --flow_label_source 1 --flow_sample_min_valid_fraction 0.95 \
+  --flow_latent_cache_mode online --flow_v2_hidden_dim 256 \
+  --flow_v2_num_heads 4 --flow_v2_num_layers 2 --flow_v2_mlp_ratio 4 \
+  --aux_dataset_config '<MOLMOACT_AUX_DATASET_CONFIG>' \
+  --dataset_entries stage05_tabletop_mixed --dataset_sample_ratios 1 \
+  --window_size 1 --per_device_train_batch_size 16 \
+  --gradient_accumulation_steps 2 --peak_learning_rate 2e-5 \
+  --lr_scheduler cosine --warmup_ratio 0.08 --min_lr_rate 0.1 \
+  --epochs 16 --max_train_steps '<CONTROLLED_SMOKE_STEPS>' \
+  --save_step_interval '<SMOKE_SAVE_INTERVAL>' --save_optimizer_and_lr_states \
+  --output_ckpt_dir '<STAGE2_OUTPUT>' --tensorboard_log_dir '<STAGE2_OUTPUT>/tensorboard' \
+  --wandb_project '<WANDB_PROJECT>' --wandb_group '<WANDB_GROUP>' \
+  --wandb_run_name '<WANDB_RUN>' --wandb_failure_policy required \
+  --tune_vlm
+```
+
+This controlled-smoke template uses online targets and probes the measured shape
+on each rank device. Use strict mode only after every sample reachable by that
+training index has a verified cache entry; then add the independent cache dir
+and `--flow_latent_shape 48 14 14`, plus the builder report's explicit
+`--flow_latent_cache_manifest_sha256 '<LOCKED_CACHE_MANIFEST_SHA256>'`. A bounded eight-entry cache cannot back a
+full shuffled dataset and strict mode will correctly fail on the first missing
+entry. Stage 3 replaces init with the complete Stage-2 checkpoint, uses
+`--training_stage stage3_joint`, positive AR/FM weights, `--tune_action_expert`,
+and the existing explicit Action Expert initialization source. Same-stage resume
+uses `--resume_from_checkpoint`, restores the complete optimizer/scheduler/RNG
+state and retains identical V2 protocol fields. A V1 checkpoint can initialize
+V2 only across stages with an explicit V2 type; it cannot be a V2 resume.
+
+The official cache writer publishes `cache_manifest.v1.json` only after all
+requested entries have been atomically installed and revalidated. Each manifest
+record locks SHA256 over canonical `(dtype, shape, contiguous latent bytes)`, the
+source identity and target protocol. Strict mode requires the manifest file's
+SHA256 in configuration. Each process parses and validates the manifest once,
+then uses its entry index while the complete file stat identity is unchanged.
+A stat change triggers a fresh locked-SHA check and full parse; stat is only a
+change detector, not a content digest. The selected latent tensor is still loaded
+and content-hashed on every read. A different manifest is rejected and never
+adopted.
+
+Before the Stage06 reader, cache writer or calibration consumes a Flow HDF5, its
+actual content identity must match the manifest SHA256. A process-local record
+binds that result to the expected digest and complete file stat identity, so
+stable files are not rehashed per sample. A stat change closes any reader handle,
+clears its row index and revalidates content before reopening. Flow HDF5 and cache
+manifests are immutable during training; replacing either file is unsupported
+even when a previous handle exists.
+
+V2 cache and checkpoint metadata bind the full target protocol, VAE config hash,
+VAE weight-content hash, normalization, color scale/directions, measured latent
+shape, filter rules, cache version/manifest fingerprint, Adapter configuration and saved
+weights. Strict read never falls back to online encoding. Old or damaged entries
+must be rebuilt explicitly; existing cache files are never silently overwritten.

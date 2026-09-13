@@ -34,8 +34,11 @@ Date: 2026-09-06. Source: local Stage06 artifacts and the supplied planning audi
   256x256 to 224x224 preserves aspect ratio. The actual checkpoint processor
   rescales by 1/255 and normalizes with mean/std `[.5,.5,.5]`/`[.5,.5,.5]`.
 - Startup validates every declared HDF5's structure/index/metadata without loading
-  dense arrays. Runtime validates fetched arrays. Full-file checksum scanning of
-  all dense labels is not performed; manifest SHA256 is retained as provenance.
+  dense arrays. Before a production reader, cache writer or calibration reads a
+  file, it lazily computes the full HDF5 byte SHA256 once per process/worker and
+  compares it with the manifest; stable stat identity reuses that verified result.
+  Runtime validates fetched arrays, and a changed/replaced file is rehashed after
+  old handles are evicted.
 
 Verification results are recorded in `docs/experiments/optical_flow_cpu/experiment.md`.
 
@@ -52,3 +55,55 @@ The obsolete manifest is zero bytes. Joint adapter additionally returned
 action `[2,32,64]`, state `[2,1,64]`, valid action-element counts `[224,7]`,
 zero AR target tokens (expected for this original LIBERO source) and only one
 flow target for the same first/tail sample pair.
+
+## MolmoAct Tabletop V2 Audit (2026-09-10)
+
+This section is a separate dataset contract for `wan_vae_latent_v2`; none of the
+LIBERO delta-10 statistics above are reused.
+
+- Root: `/opt/data/private/lq/datasets/molmoact_dataset_tabletop-v3_stage05/stage06_flow/molmoact_tabletop`.
+  Manifest: `manifest.f61339e88e1b99c9.jsonl`, SHA256
+  `0438bbe865b2df8da7515b9bfa995483ef0ceea8161756898da57ef6a8c6023c`.
+- The manifest has 1881 episodes and 310743 frames for dataset
+  `molmoact_tabletop`, camera `first_view`. HDF5 flow is float16
+  `[T,2,224,224]`, mask is uint8 `[T,1,224,224]`, and saved valid fraction is
+  float32. Each row carries source/target frame, actual frame/time delta and
+  label source. Reader joins by mapped dataset episode plus source frame.
+- `stage06_config.f61339e88e1b99c9.global.20260818T070952218100Z-8a934652.json`
+  declares delta 20 and tail clamp. The actual deltas cover 0 through 20:
+  273123 rows have the full delta, 35739 have positive short tail deltas, and
+  1881 final identity rows have delta 0/source 2.
+- The fixed V2 rule is expected actual delta 20, `flow_label_source=1`, tail
+  excluded and whole-mask `flow_sample_min_valid_fraction=0.95`. A read-only
+  scan of the saved scalar arrays found 265136 qualifying rows, 85.3232% of all
+  rows and 97.0705% of full-delta rows. This is an exact scalar-field count;
+  it is not a magnitude calibration or pixel distribution estimate.
+- Generator evidence is FD-ID-FlowVLA commit
+  `3824d36cdf76bf0a9d537635de92a38f3920e9a3`:
+  `stage06_flow/generate.py` supplies source then target to MegaFlow;
+  `flow_ops.py::normalize_and_resize_flow` validates `source + (u,v)` within
+  bounds, divides `u` by source `W-1` and `v` by source `H-1`, bilinear-resizes
+  normalized vectors to 224, and nearest-resizes masks. The stored direction is
+  source-to-target, with positive `u` right and positive `v` down.
+- The fixed color transform follows the vendored
+  `megaflow/utils/flow_viz.py::flow_uv_to_colors`: RGB channel order and
+  `atan2(-v,-u)`. V2 supplies flow divided by one locked training scale and
+  retains float interpolation without the reference visualization's uint8
+  floor. Zero flow and invalid pixels are white. It never calls the reference
+  `flow_to_image` per-image maximum normalization.
+- Each manifest/HDF5 supplies dataset, camera, generation, label and file-content
+  identities. The V2 cache additionally binds these to mapped and label episode,
+  source/target frame, FPS, source/target timestamps and actual delta. Missing
+  labels remain unsupervised; malformed declared labels fail. Production readers
+  verify actual HDF5 content against the declared SHA256 before first use. The
+  verified result is reused only while expected SHA256 and full stat identity are
+  unchanged; a changed/replaced file closes the prior handle and is revalidated.
+- Current `stage06_flow_manifest_v2` / `stage06_flow_v2` files require float
+  `[T]` `valid_fraction` values in `[0,1]`. The reader checks this scalar schema
+  lazily when a file opens and compares each consumed value with the corresponding
+  binary-mask mean using absolute tolerance `1e-6`. Missing version markers are
+  an error. Only `stage06_flow_legacy_v1` explicitly declared by the manifest or
+  reader contract permits an unversioned HDF5 and optional `valid_fraction`; if
+  that scalar is present, the same shape/value/per-frame checks apply.
+
+No full magnitude calibration, latent-cache build or source-data write was run.

@@ -37,7 +37,29 @@ def prepare_flow_targets(batch, config, device):
     return torch.tensor(indices, device=device), torch.stack(targets), torch.stack(masks)
 
 
-def optical_flow_loss(prediction, batch, config):
+def optical_flow_latent_loss(prediction, batch, config, target_builder):
+    target, indices = target_builder.build_targets(batch, prediction.device)
+    zero = prediction.float().sum() * 0.0
+    count = prediction.new_tensor(len(indices), dtype=torch.float32)
+    if not len(indices):
+        loss_sum = zero
+    else:
+        if tuple(prediction.shape[1:]) != tuple(target.shape[1:]):
+            raise ValueError(f"V2 latent shape mismatch: prediction={tuple(prediction.shape[1:])}, target={tuple(target.shape[1:])}")
+        if not torch.isfinite(prediction[indices]).all() or not torch.isfinite(target).all():
+            raise ValueError("V2 latent prediction/target must be finite")
+        loss_sum = (prediction[indices].float() - target.float()).square().flatten(1).mean(1).sum() + zero
+    return {"optical_flow_loss_sum": loss_sum, "optical_flow_loss_count": count,
+            "optical_flow_loss": loss_sum / count.clamp_min(1),
+            "flow_latent_mse_sum": loss_sum.detach(),
+            "flow_batch_samples": prediction.new_tensor(prediction.shape[0], dtype=torch.float32)}
+
+
+def optical_flow_loss(prediction, batch, config, target_builder=None):
+    if config.optical_flow_aux_type == "wan_vae_latent_v2":
+        if target_builder is None:
+            raise ValueError("V2 flow loss requires a target builder")
+        return optical_flow_latent_loss(prediction, batch, config, target_builder)
     indices, target, valid = prepare_flow_targets(batch, config, prediction.device)
     zero = prediction.float().sum() * 0.0
     names = ("epe", "motion_epe", "zero_epe", "valid_fraction", "motion_fraction", "eligible_pixels")
@@ -61,3 +83,11 @@ def optical_flow_loss(prediction, batch, config):
             "optical_flow_loss": loss_sum / count.clamp_min(1),
             **{"flow_" + key + "_sum": value for key, value in stats.items()},
             "flow_batch_samples": prediction.new_tensor(prediction.shape[0], dtype=torch.float32)}
+
+
+def flow_supervision_indices(batch, config, device):
+    """Use the loss branch's exact eligibility rule for window normalization."""
+    if config.optical_flow_aux_type == "wan_vae_latent_v2":
+        from utils.optical_flow_v2 import select_v2_flow_indices
+        return torch.tensor(select_v2_flow_indices(batch, config), dtype=torch.long, device=device)
+    return prepare_flow_targets(batch, config, device)[0]

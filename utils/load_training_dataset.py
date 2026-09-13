@@ -722,6 +722,10 @@ def build_concat_streaming_dataset(
         raise ValueError("enabled OF requires a registered per-dataset flow manifest")
     selected_entries = []
     needs_fast = False
+    flow_label_source = (optical_flow_config.flow_label_source
+                         if optical_flow_config is not None and optical_flow_config.enabled
+                         and getattr(optical_flow_config, "optical_flow_aux_type", None) == "wan_vae_latent_v2"
+                         else 1)
     for dataset_id, dataset_entry in enumerate(dataset_entries):
         if dataset_entry not in DATASET2FEATURE:
             raise ValueError(f"Unknown dataset entry {dataset_entry!r}")
@@ -739,7 +743,8 @@ def build_concat_streaming_dataset(
         if optical_flow_config is not None and optical_flow_config.enabled and entry.get("optical_flow_manifest"):
             entry.update(optical_flow_data_root=entry.get("optical_flow_data_root", optical_flow_data_root),
                          optical_flow_manifest=entry.get("optical_flow_manifest", optical_flow_manifest),
-                         flow_delta_frames=entry.get("flow_delta_frames", optical_flow_config.flow_delta_frames))
+                         flow_delta_frames=entry.get("flow_delta_frames", optical_flow_config.flow_delta_frames),
+                         flow_label_source=flow_label_source)
         if entry.get("dataset_adapter") == "stage06_libero_flow":
             if optical_flow_config is None or not optical_flow_config.enabled:
                 raise ValueError("stage06_flow dataset requires explicitly enabled OF")
@@ -747,7 +752,8 @@ def build_concat_streaming_dataset(
                 raise ValueError("stage06_flow requires window_size=1")
             entry.update(optical_flow_data_root=optical_flow_data_root,
                          optical_flow_manifest=optical_flow_manifest,
-                         flow_delta_frames=optical_flow_config.flow_delta_frames)
+                         flow_delta_frames=optical_flow_config.flow_delta_frames,
+                         flow_label_source=flow_label_source)
         if dataset_sample_ratios is not None:
             entry["sample_ratio"] = dataset_sample_ratios[dataset_id]
         sample_ratio = entry.get("sample_ratio")
@@ -933,9 +939,14 @@ def custom_collate_fn(batch):
             keys.discard(key)
     flow_keys = {key for item in batch for key in item if key.startswith("flow_")}
     if flow_keys:
+        flow_metadata_keys = {"flow_dataset_id", "flow_camera", "flow_manifest_sha256",
+                              "flow_generation_identity", "flow_label_identity",
+                              "flow_label_file_sha256"}
         for key in flow_keys:
             if key in {"flow_target", "flow_valid_mask"}:
                 result[key] = {index: item[key] for index, item in enumerate(batch) if item.get(key) is not None}
+            elif key in flow_metadata_keys:
+                result[key] = [item.get(key, "") for item in batch]
             else:
                 default = torch.tensor(False) if key == "flow_supervision_available" else torch.tensor(-1)
                 result[key] = torch.stack([item.get(key, default) for item in batch])

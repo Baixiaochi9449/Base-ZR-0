@@ -24,6 +24,18 @@ class OpticalFlowConfig:
     flow_motion_threshold: float = 0.01
     flow_loss_epsilon: float = 1e-3
     flow_init_seed: int = 42
+    flow_vae_model_path: str | None = None
+    flow_color_scale: float | None = None
+    flow_label_source: int = 1
+    flow_sample_min_valid_fraction: float = 0.95
+    flow_latent_cache_dir: str | None = None
+    flow_latent_cache_mode: str = "online"
+    flow_latent_cache_manifest_sha256: str | None = None
+    flow_v2_hidden_dim: int = 256
+    flow_v2_num_heads: int = 4
+    flow_v2_num_layers: int = 2
+    flow_v2_mlp_ratio: int = 4
+    flow_latent_shape: tuple[int, int, int] | None = None
 
     @property
     def enabled(self):
@@ -33,7 +45,7 @@ class OpticalFlowConfig:
         return asdict(self)
 
     def validate(self):
-        if self.optical_flow_aux_type not in {"none", "dense_regression_v1"}:
+        if self.optical_flow_aux_type not in {"none", "dense_regression_v1", "wan_vae_latent_v2"}:
             raise NotImplementedError(self.optical_flow_aux_type)
         for name in ("optical_flow_loss_weight", "flow_motion_loss_weight", "flow_motion_threshold"):
             value = getattr(self, name)
@@ -51,10 +63,41 @@ class OpticalFlowConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be positive")
-        if (self.flow_grid_size, self.flow_target_resolution, self.flow_head_num_heads) != (14, 56, 8):
-            raise ValueError("dense_regression_v1 requires grid=14, resolution=56, heads=8")
-        if self.flow_head_hidden_dim % 8:
-            raise ValueError("flow_head_hidden_dim must be divisible by 8")
+        if self.optical_flow_aux_type == "dense_regression_v1":
+            if (self.flow_grid_size, self.flow_target_resolution, self.flow_head_num_heads) != (14, 56, 8):
+                raise ValueError("dense_regression_v1 requires grid=14, resolution=56, heads=8")
+            if self.flow_head_hidden_dim % 8:
+                raise ValueError("flow_head_hidden_dim must be divisible by 8")
+        else:
+            if not self.flow_vae_model_path:
+                raise ValueError("wan_vae_latent_v2 requires explicit flow_vae_model_path")
+            if self.flow_color_scale is None or not math.isfinite(self.flow_color_scale) or self.flow_color_scale <= 0:
+                raise ValueError("wan_vae_latent_v2 requires positive locked flow_color_scale")
+            if (isinstance(self.flow_label_source, bool)
+                    or not isinstance(self.flow_label_source, int) or self.flow_label_source < 1):
+                raise ValueError("flow_label_source must be a positive integer")
+            if self.flow_latent_cache_mode not in {"online", "strict"}:
+                raise ValueError("flow_latent_cache_mode must be online or strict")
+            if self.flow_latent_cache_mode == "strict" and not self.flow_latent_cache_dir:
+                raise ValueError("strict latent cache mode requires flow_latent_cache_dir")
+            manifest_hash = self.flow_latent_cache_manifest_sha256
+            if self.flow_latent_cache_mode == "strict":
+                if (not isinstance(manifest_hash, str) or len(manifest_hash) != 64
+                        or any(character not in "0123456789abcdef" for character in manifest_hash)):
+                    raise ValueError("strict latent cache mode requires flow_latent_cache_manifest_sha256")
+            elif manifest_hash is not None:
+                raise ValueError("flow_latent_cache_manifest_sha256 is only valid in strict cache mode")
+            if not 0 < self.flow_sample_min_valid_fraction <= 1:
+                raise ValueError("flow_sample_min_valid_fraction must be in (0,1]")
+            for name in ("flow_v2_hidden_dim", "flow_v2_num_heads", "flow_v2_num_layers", "flow_v2_mlp_ratio"):
+                value = getattr(self, name)
+                if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                    raise ValueError(f"{name} must be positive")
+            if self.flow_v2_hidden_dim % self.flow_v2_num_heads:
+                raise ValueError("flow_v2_hidden_dim must be divisible by flow_v2_num_heads")
+            if self.flow_latent_shape is not None:
+                if len(self.flow_latent_shape) != 3 or any(int(v) < 1 for v in self.flow_latent_shape):
+                    raise ValueError("flow_latent_shape must be [Cz,Hz,Wz]")
         if not 0 < self.flow_cell_min_valid_fraction <= 1:
             raise ValueError("flow_cell_min_valid_fraction must be in (0,1]")
         if not math.isfinite(self.flow_loss_epsilon) or self.flow_loss_epsilon <= 0:

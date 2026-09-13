@@ -60,8 +60,21 @@ def build_train_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume_from_checkpoint")
     parser.add_argument("--optical_flow_data_root")
     parser.add_argument("--optical_flow_manifest", default="manifest.2849ed69240ad542.jsonl")
+    def optional_value(converter):
+        return lambda value: None if value == "None" else converter(value)
+
     for name, field in OpticalFlowConfig.__dataclass_fields__.items():
-        parser.add_argument("--" + name, type=(int if name == "num_flow_queries" else type(field.default)), default=field.default)
+        if name == "num_flow_queries":
+            argument_type, argument_kwargs = optional_value(int), {}
+        elif name == "flow_latent_shape":
+            argument_type, argument_kwargs = str, {"nargs": "+"}
+        elif name == "flow_color_scale":
+            argument_type, argument_kwargs = optional_value(float), {}
+        elif field.default is None:
+            argument_type, argument_kwargs = optional_value(str), {}
+        else:
+            argument_type, argument_kwargs = type(field.default), {}
+        parser.add_argument("--" + name, type=argument_type, default=field.default, **argument_kwargs)
     parser.add_argument(
         "--vlm_name_or_path", type=str, help="file path of pretrained VLM"
     )
@@ -343,6 +356,16 @@ def parse_train_options(args=None) -> argparse.Namespace:
     parser = build_train_parser()
     raw_args = list(sys.argv[1:] if args is None else args)
     options = parser.parse_args(raw_args)
+    if options.flow_latent_shape is not None:
+        if options.flow_latent_shape == ["None"]:
+            options.flow_latent_shape = None
+        elif len(options.flow_latent_shape) == 3:
+            try:
+                options.flow_latent_shape = tuple(int(value) for value in options.flow_latent_shape)
+            except ValueError:
+                parser.error("--flow_latent_shape requires three integers or None")
+        else:
+            parser.error("--flow_latent_shape requires three integers or None")
     explicit = {token[2:].split("=", 1)[0] for token in raw_args if token.startswith("--")}
     options.loss_type_explicit = "loss_type" in explicit
     options.optical_flow_explicit_fields = sorted(explicit & OpticalFlowConfig.__dataclass_fields__.keys())

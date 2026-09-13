@@ -299,11 +299,13 @@ def test_flow_remapping_preserves_original_hdf5_and_checks_full_source_timestamp
     rows = [{"episode_index": 67, "frame_index": frame, "timestamp": frame / 10} for frame in (3, 13)]
     pq.write_table(pa.Table.from_pylist(rows), root / "rows.parquet")
     record = fixture_manifest(tmp_path)
+    record.pop("schema_contract")
     provenance = {key: "fixture" for key in ("artifact_identity", "generation_identity", "label_identity",
         "source_fingerprint", "checkpoint_sha256", "model_revision")}
     record.update(provenance, schema_version="stage06_flow_manifest_v2", dataset_id="droid")
     with h5py.File(tmp_path / "0.h5", "a") as handle:
         handle.attrs.update(provenance, schema_version="stage06_flow_v2", dataset_id="droid", output_height=224, output_width=224)
+        handle["valid_fraction"] = handle["valid_mask"][:].reshape(2, -1).mean(axis=1).astype("float32")
         handle["source_timestamp_s"] = [.3, 1.3]
         handle["target_timestamp_s"] = [1.3, 1.3]
         handle["actual_delta_s"] = [1., 0.]
@@ -340,6 +342,7 @@ def test_flow_excluded_frames_are_masked_without_mutating_the_original_artifact(
     with h5py.File(tmp_path / "0.h5", "a") as stream:
         stream["target_frame_index"][:] = [13, 23, 23]
         stream["actual_delta_frames"][:] = [10, 10, 0]
+    record["sha256"] = hashlib.sha256((tmp_path / "0.h5").read_bytes()).hexdigest()
     manifest = tmp_path / "manifest.jsonl"
     manifest.write_text(json.dumps(record))
     original = hashlib.sha256((tmp_path / "0.h5").read_bytes()).hexdigest()
@@ -370,10 +373,12 @@ def test_flow_exclusion_preserves_source_alignment_and_unchanged_interval_tolera
             for frame, time in zip((3, 13, 23), (.3, 1.30004, 2.30004))]
     pq.write_table(pa.Table.from_pylist(rows), tmp_path / "rows.parquet")
     record = fixture_manifest(tmp_path, frames=(3, 13, 23))
+    record.pop("schema_contract")
     provenance = {key: "fixture" for key in ("artifact_identity", "generation_identity", "label_identity",
         "source_fingerprint", "checkpoint_sha256", "model_revision")}
     with h5py.File(tmp_path / "0.h5", "a") as stream:
         stream.attrs.update(provenance, schema_version="stage06_flow_v2", dataset_id="rh20t", output_height=224, output_width=224)
+        stream["valid_fraction"] = stream["valid_mask"][:].reshape(3, -1).mean(axis=1).astype("float32")
         stream["target_frame_index"][:] = [13, 23, 23]
         stream["actual_delta_frames"][:] = [10, 10, 0]
         stream["source_timestamp_s"] = [.3, 1.30004, 2.30004]

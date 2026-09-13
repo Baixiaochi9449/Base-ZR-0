@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from test_optical_flow_aux import fixture_manifest
+from utils.aux_data_contract import digest_file
 from utils.optical_flow_reader import OpticalFlowReader
 from utils.slot_labels import normalize_slot_labels
 from utils.slot_config import SlotConfig
@@ -41,10 +42,12 @@ def stage05_flow_fixture(tmp_path):
     flow = tmp_path / "flow"
     flow.mkdir()
     record = fixture_manifest(flow, frames=(0, 1, 2))
+    record.pop("schema_contract")
     record.update(source_episode_index=19, camera_key="first_view", dataset_id="toy", schema_version="stage06_flow_manifest_v2")
     with h5py.File(flow / "0.h5", "a") as h:
         h.attrs.update(source_episode_index=19, nominal_delta_frames=2, camera_key="first_view", dataset_id="toy",
                        schema_version="stage06_flow_v2", output_height=224, output_width=224)
+        h["valid_fraction"] = h["valid_mask"][:].reshape(3, -1).mean(axis=1).astype(np.float32)
         for key in ("artifact_identity", "generation_identity", "label_identity", "source_fingerprint", "checkpoint_sha256", "model_revision"):
             record[key] = "fixture-v1"
             h.attrs[key] = record[key]
@@ -167,11 +170,15 @@ def test_failed_lazy_validation_can_retry_without_cache_poison(tmp_path):
     reader = OpticalFlowReader(tmp_path, path)
     with h5py.File(tmp_path / "0.h5", "a") as handle:
         handle["frame_index"][1] = 3
+    entry["sha256"] = digest_file(tmp_path / "0.h5")
+    reader.episodes[0][1]["sha256"] = entry["sha256"]
     with pytest.raises(ValueError, match="duplicate"):
         reader.read(0, 3)
     assert not reader.rows and not reader._handles
     with h5py.File(tmp_path / "0.h5", "a") as handle:
         handle["frame_index"][1] = 13
+    entry["sha256"] = digest_file(tmp_path / "0.h5")
+    reader.episodes[0][1]["sha256"] = entry["sha256"]
     assert reader.read(0, 3)["flow_supervision_available"]
     reader.close()
 
@@ -236,6 +243,8 @@ def test_required_flow_time_metadata(tmp_path, field, value):
             del handle.attrs[field]
         else:
             handle.attrs[field] = value
+    entry["sha256"] = digest_file(tmp_path / "0.h5")
+    path.write_text(json.dumps(entry))
     with pytest.raises(ValueError, match=field):
         reader = OpticalFlowReader(tmp_path, path)
         reader.read(0, 3)

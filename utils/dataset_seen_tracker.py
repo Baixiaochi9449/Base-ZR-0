@@ -90,10 +90,15 @@ class DatasetSeenTracker:
                 available = batch.get("flow_supervision_available", zero).to(device)
                 eligible, pixels = zero.clone(), zero.clone()
                 if self.flow_config is not None and self.flow_config.enabled:
-                    from utils.optical_flow_loss import prepare_flow_targets
-                    indices, _, masks = prepare_flow_targets(batch, self.flow_config, device)
+                    from utils.optical_flow_loss import flow_supervision_indices, prepare_flow_targets
+                    indices = flow_supervision_indices(batch, self.flow_config, device)
                     eligible[indices] = 1
-                    pixels[indices] = masks.flatten(1).sum(1)
+                    if self.flow_config.optical_flow_aux_type == "wan_vae_latent_v2":
+                        for index in indices.tolist():
+                            pixels[index] = batch["flow_valid_mask"][index].sum().to(device)
+                    else:
+                        _, _, masks = prepare_flow_targets(batch, self.flow_config, device)
+                        pixels[indices] = masks.flatten(1).sum(1)
                 reasons = batch.get("flow_exclusion_reason", torch.full_like(zero, -1)).to(device)
                 values += [available, eligible, pixels, reasons == 1, reasons == 2, (available.bool() & ~eligible.bool())]
                 counters = torch.stack([value.long() for value in values], dim=1)

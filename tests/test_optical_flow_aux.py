@@ -1,3 +1,4 @@
+import hashlib
 import json
 import pickle
 from dataclasses import replace
@@ -108,7 +109,9 @@ def fixture_manifest(root, frames=(3, 13), episode=0):
         f["flow"] = np.full((n, 2, 224, 224), .02, dtype=np.float16)
         f["valid_mask"] = np.ones((n, 1, 224, 224), dtype=np.uint8)
     return {"merged_episode_index": episode, "source_episode_index": episode,
-            "camera_key": "observation.images.image", "frame_count": n, "hdf5_path": path.name}
+            "camera_key": "observation.images.image", "frame_count": n, "hdf5_path": path.name,
+            "schema_contract": "stage06_flow_legacy_v1",
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
 
 
 def test_reader_mapping_lru_pickle_and_corruption(tmp_path):

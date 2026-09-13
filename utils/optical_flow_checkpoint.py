@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import warnings
 from pathlib import Path
 import torch
@@ -15,6 +16,13 @@ CONFIG_NAME = "optical_flow_aux_config.json"
 WEIGHTS_NAME = "optical_flow_aux.safetensors"
 COMPUTED_FLAGS = ("ar_loss_computed", "slot_loss_computed", "flow_loss_computed", "fm_loss_computed")
 STAGE_STATE_SCOPE = "current_stage_completed_optimizer_windows"
+V1_OPTIONAL_CONFIG_FIELDS = {
+    "flow_vae_model_path", "flow_color_scale", "flow_label_source",
+    "flow_sample_min_valid_fraction", "flow_latent_cache_dir", "flow_latent_cache_mode",
+    "flow_latent_cache_manifest_sha256",
+    "flow_v2_hidden_dim", "flow_v2_num_heads", "flow_v2_num_layers", "flow_v2_mlp_ratio",
+    "flow_latent_shape",
+}
 
 
 def initial_stage_training_state(stage, config, slot_aux_type="none"):
@@ -129,6 +137,61 @@ def module_checksum(module):
     return digest.hexdigest()
 
 
+def _v2_adapter_metadata(config, latent_shape, input_dim, parameter_count):
+    return {"num_flow_queries": config.num_flow_queries,
+            "input_dim": int(input_dim), "latent_shape": list(latent_shape),
+            "hidden_dim": config.flow_v2_hidden_dim, "num_heads": config.flow_v2_num_heads,
+            "num_layers": config.flow_v2_num_layers, "mlp_ratio": config.flow_v2_mlp_ratio,
+            "init_seed": config.flow_init_seed, "parameter_count": int(parameter_count)}
+
+
+def _validate_v2_checkpoint_payload(payload, config, query, actual_shapes):
+    if payload.get("version") != 4:
+        raise ValueError("legacy/incomplete V2 checkpoint protocol is unsupported; rebuild the V2 checkpoint")
+    shape = tuple(config.flow_latent_shape or ())
+    if len(shape) != 3 or payload.get("latent_shape") != list(shape):
+        raise ValueError("V2 checkpoint is missing its complete latent shape")
+    metadata = payload.get("v2_protocol")
+    required = {"target_protocol", "target_protocol_fingerprint", "cache_entry_version",
+                "cache_protocol_fingerprint", "cache_manifest", "adapter", "adapter_sha256"}
+    if not isinstance(metadata, dict) or set(metadata) != required:
+        raise ValueError("V2 checkpoint protocol metadata is incomplete")
+    if payload.get("v2_metadata_sha256") != json_hash(metadata):
+        raise ValueError("V2 checkpoint protocol metadata hash mismatch")
+    from utils.optical_flow_v2 import canonical_json_hash, validate_target_protocol
+    validate_target_protocol(metadata["target_protocol"], config, shape)
+    if metadata["target_protocol_fingerprint"] != canonical_json_hash(metadata["target_protocol"]):
+        raise ValueError("V2 checkpoint target protocol fingerprint mismatch")
+    from utils.optical_flow_v2 import CACHE_ENTRY_VERSION, validate_cache_manifest_identity
+    if (metadata["cache_entry_version"] != CACHE_ENTRY_VERSION
+            or metadata["cache_protocol_fingerprint"] != metadata["target_protocol_fingerprint"]):
+        raise ValueError("V2 checkpoint cache protocol fingerprint/version mismatch")
+    validate_cache_manifest_identity(metadata["cache_manifest"], config,
+                                     metadata["target_protocol_fingerprint"])
+    parameter_count = sum(math.prod(dimensions) for dimensions in actual_shapes.values())
+    expected_adapter = _v2_adapter_metadata(config, shape, query.hidden_size, parameter_count)
+    if metadata["adapter"] != expected_adapter or metadata["adapter_sha256"] != json_hash(expected_adapter):
+        raise ValueError("V2 checkpoint Adapter configuration/parameter count mismatch")
+
+
+def validate_v2_runtime_payload(payload, builder, head):
+    """Compare a loaded checkpoint with the actual local VAE and constructed head."""
+    if payload is None or payload.get("replace_flow_head"):
+        return
+    if payload["config"]["optical_flow_aux_type"] != "wan_vae_latent_v2":
+        return
+    metadata = payload["v2_protocol"]
+    if (metadata["target_protocol"] != builder.target_protocol
+            or metadata["target_protocol_fingerprint"] != builder.protocol_fingerprint
+            or metadata["cache_protocol_fingerprint"] != builder.protocol_fingerprint
+            or metadata["cache_manifest"] != builder.cache_manifest_identity):
+        raise ValueError("V2 checkpoint VAE weights/config/protocol differ from the runtime builder")
+    adapter = _v2_adapter_metadata(builder.config, head.latent_shape,
+                                   head.input_norm.normalized_shape[0], sum(p.numel() for p in head.parameters()))
+    if metadata["adapter"] != adapter:
+        raise ValueError("V2 checkpoint Adapter metadata differs from the runtime head")
+
+
 def is_cross_stage_initialization(source_stage, stage, *, initialize, resume):
     from utils.optical_flow_config import STAGES
     return (initialize and not resume and source_stage in STAGES and stage in STAGES
@@ -146,11 +209,22 @@ def read_flow_artifacts(directory):
             raise ValueError("staged checkpoint is missing its OF configuration sidecar")
         return None
     payload = json.loads(config_path.read_text())
-    if not isinstance(payload.get("config"), dict) or set(payload["config"]) != set(OpticalFlowConfig.__dataclass_fields__):
+    if payload.get("version") in (2, 3):
+        raise ValueError("legacy/incomplete V2 checkpoint protocol is unsupported; rebuild the V2 checkpoint")
+    if not isinstance(payload.get("config"), dict) or not set(OpticalFlowConfig.__dataclass_fields__).issuperset(payload["config"]):
         raise ValueError("incomplete OF config fields")
-    if payload.get("version") != 1 or payload.get("config_sha256") != json_hash(payload["config"]):
+    missing = set(OpticalFlowConfig.__dataclass_fields__) - set(payload["config"])
+    if missing and (payload.get("version") != 1 or not missing.issubset(V1_OPTIONAL_CONFIG_FIELDS)):
+        raise ValueError("incomplete OF config fields")
+    config_payload = {name: payload["config"].get(name, getattr(OpticalFlowConfig(), name))
+                      for name in OpticalFlowConfig.__dataclass_fields__}
+    if config_payload.get("flow_latent_shape") is not None:
+        config_payload["flow_latent_shape"] = tuple(config_payload["flow_latent_shape"])
+    if payload.get("version") not in (1, 4) or payload.get("config_sha256") != json_hash(payload["config"]):
         raise ValueError("OF config hash/version mismatch")
-    config = OpticalFlowConfig(**payload["config"]).validate()
+    config = OpticalFlowConfig(**config_payload).validate()
+    if ((config.optical_flow_aux_type == "wan_vae_latent_v2") != (payload.get("version") == 4)):
+        raise ValueError("V1/V2 checkpoint type and metadata version conflict")
     from utils.slot_checkpoint import resolve_slot_checkpoint
     slot, _ = resolve_slot_checkpoint(root)
     if slot.slot_aux_type != payload.get("slot_aux_type", "none"):
@@ -183,14 +257,40 @@ def read_flow_artifacts(directory):
         from safetensors import safe_open
         with safe_open(str(weight_path), framework="pt", device="cpu") as tensors:
             actual = {key: tensors.get_slice(key).get_shape() for key in tensors.keys()}
-        hidden, input_dim = config.flow_head_hidden_dim, query.hidden_size
-        shapes = {"input_norm.weight": [input_dim], "input_norm.bias": [input_dim],
-            "input_projection.weight": [hidden, input_dim], "input_projection.bias": [hidden],
-            "grid": [1, config.flow_grid_size ** 2, hidden],
-            "refinement.0.weight": [hidden, hidden, 3, 3], "refinement.0.bias": [hidden],
-            "refinement.1.weight": [hidden], "refinement.1.bias": [hidden],
-            "output.weight": [2, hidden, 3, 3], "output.bias": [2]}
-        for index in range(config.flow_head_num_layers):
+        if config.optical_flow_aux_type == "wan_vae_latent_v2":
+            shape = tuple(config.flow_latent_shape or ())
+            if len(shape) != 3:
+                raise ValueError("V2 checkpoint is missing latent shape")
+            hidden, input_dim = config.flow_v2_hidden_dim, query.hidden_size
+            expected = {"input_norm.weight": [input_dim], "input_norm.bias": [input_dim],
+                        "input_projection.weight": [hidden, input_dim], "input_projection.bias": [hidden],
+                        "spatial_tokens": [1, int(shape[1]) * int(shape[2]), hidden],
+                        "output_norm.weight": [hidden], "output_norm.bias": [hidden],
+                        "output.weight": [int(shape[0]), hidden], "output.bias": [int(shape[0])]}
+            for index in range(config.flow_v2_num_layers):
+                for key, value in {"q_norm.weight": [hidden], "q_norm.bias": [hidden],
+                                   "kv_norm.weight": [hidden], "kv_norm.bias": [hidden],
+                                   "attention.in_proj_weight": [3 * hidden, hidden],
+                                   "attention.in_proj_bias": [3 * hidden],
+                                   "attention.out_proj.weight": [hidden, hidden],
+                                   "attention.out_proj.bias": [hidden],
+                                   "mlp_norm.weight": [hidden], "mlp_norm.bias": [hidden],
+                                   "mlp.0.weight": [config.flow_v2_mlp_ratio * hidden, hidden],
+                                   "mlp.0.bias": [config.flow_v2_mlp_ratio * hidden],
+                                   "mlp.2.weight": [hidden, config.flow_v2_mlp_ratio * hidden],
+                                   "mlp.2.bias": [hidden]}.items():
+                    expected[f"layers.{index}.{key}"] = value
+        else:
+            hidden, input_dim = config.flow_head_hidden_dim, query.hidden_size
+            expected = {"input_norm.weight": [input_dim], "input_norm.bias": [input_dim],
+                        "input_projection.weight": [hidden, input_dim], "input_projection.bias": [hidden],
+                        "grid": [1, config.flow_grid_size ** 2, hidden],
+                        "refinement.0.weight": [hidden, hidden, 3, 3], "refinement.0.bias": [hidden],
+                        "refinement.1.weight": [hidden], "refinement.1.bias": [hidden],
+                        "output.weight": [2, hidden, 3, 3], "output.bias": [2]}
+        shapes = expected
+        if config.optical_flow_aux_type != "wan_vae_latent_v2":
+          for index in range(config.flow_head_num_layers):
             for key, shape in {"attention.in_proj_weight": [3 * hidden, hidden],
                 "attention.in_proj_bias": [3 * hidden], "attention.out_proj.weight": [hidden, hidden],
                 "attention.out_proj.bias": [hidden], "norm.weight": [hidden], "norm.bias": [hidden],
@@ -200,6 +300,8 @@ def read_flow_artifacts(directory):
                 shapes[f"layers.{index}.{key}"] = shape
         if actual != shapes:
             raise ValueError("OF weight shape / Difference Query hidden size mismatch")
+        if config.optical_flow_aux_type == "wan_vae_latent_v2":
+            _validate_v2_checkpoint_payload(payload, config, query, actual)
     if query is not None and config.num_flow_queries is not None and metadata_path.is_file():
         from utils.slot_config import resolve_query_layout
         layout = resolve_query_layout(query.num_difference_queries, config.num_flow_queries,
@@ -215,14 +317,21 @@ def resolve_flow_checkpoint(directory, requested=None, *, explicit_fields=None, 
         if resume and stage is not None:
             raise ValueError("new-stage resume requires stage/OF checkpoint metadata")
         return (requested or OpticalFlowConfig()).validate(), None
-    saved = OpticalFlowConfig(**payload["config"])
+    saved_payload = {name: payload["config"].get(name, getattr(OpticalFlowConfig(), name))
+                     for name in OpticalFlowConfig.__dataclass_fields__}
+    if saved_payload.get("flow_latent_shape") is not None:
+        saved_payload["flow_latent_shape"] = tuple(saved_payload["flow_latent_shape"])
+    saved = OpticalFlowConfig(**saved_payload)
     if resume and payload["training_stage"] != stage:
         raise ValueError("resume_from_checkpoint requires the same training_stage")
     if requested is None:
         return saved, payload
     fields = set(requested.to_dict()) if explicit_fields is None else set(explicit_fields)
-    removing = (saved.enabled and "optical_flow_aux_type" in fields and not requested.enabled and
-        is_cross_stage_initialization(payload["training_stage"], stage, initialize=initialize, resume=resume))
+    cross_stage = is_cross_stage_initialization(
+        payload["training_stage"], stage, initialize=initialize, resume=resume)
+    replacing = (saved.enabled and requested.enabled and "optical_flow_aux_type" in fields
+                 and requested.optical_flow_aux_type != saved.optical_flow_aux_type and cross_stage)
+    removing = (saved.enabled and "optical_flow_aux_type" in fields and not requested.enabled and cross_stage)
     if removing and explicit_fields is None:
         defaults = OpticalFlowConfig()
         fields = {name for name in fields if getattr(requested, name) != getattr(defaults, name)} | {
@@ -232,13 +341,15 @@ def resolve_flow_checkpoint(directory, requested=None, *, explicit_fields=None, 
     for name in fields:
         if removing and name in {"optical_flow_aux_type", "optical_flow_loss_weight"}:
             continue
-        if (saved.enabled or resume) and getattr(requested, name) != getattr(saved, name):
+        if not replacing and (saved.enabled or resume) and getattr(requested, name) != getattr(saved, name):
             raise ValueError(f"explicit OF config conflicts with checkpoint: {name}")
     merged = {**saved.to_dict(), **{name: getattr(requested, name) for name in fields}}
     if saved.num_flow_queries is not None:
         merged["num_flow_queries"] = saved.num_flow_queries
     if removing and "optical_flow_loss_weight" not in fields:
         merged["optical_flow_loss_weight"] = 0.
+    if replacing:
+        payload = {**payload, "replace_flow_head": True}
     return OpticalFlowConfig(**merged).validate(), payload
 
 
@@ -252,16 +363,37 @@ def save_flow_artifacts(model, directory):
         save_file(model.optical_flow_aux.state_dict(), str(weight_path))
     elif weight_path.exists():
         weight_path.unlink()
-    payload = {"version": 1, **stage_state,
+    payload = {"version": 4 if config.optical_flow_aux_type == "wan_vae_latent_v2" else 1, **stage_state,
                "slot_aux_type": getattr(getattr(model, "slot_config", None), "slot_aux_type", "none"),
                "config": config.to_dict(), "config_sha256": json_hash(config.to_dict()),
                "weights_sha256": hashlib.sha256(weight_path.read_bytes()).hexdigest() if config.enabled else None,
                "initialization": getattr(model, "aux_initialization", {})}
+    if config.optical_flow_aux_type == "wan_vae_latent_v2":
+        builder = getattr(model, "flow_target_builder", None)
+        if builder is None or model.optical_flow_aux is None:
+            raise ValueError("V2 checkpoint requires its runtime target builder and Adapter")
+        shape = tuple(model.optical_flow_aux.latent_shape)
+        if tuple(config.flow_latent_shape or ()) != shape:
+            raise ValueError("V2 checkpoint config/head latent shapes differ")
+        from utils.optical_flow_v2 import CACHE_ENTRY_VERSION, validate_target_protocol
+        validate_target_protocol(builder.target_protocol, config, shape,
+                                 actual_vae_identity=builder.vae_identity)
+        adapter = _v2_adapter_metadata(config, shape,
+            model.optical_flow_aux.input_norm.normalized_shape[0],
+            sum(parameter.numel() for parameter in model.optical_flow_aux.parameters()))
+        v2_protocol = {"target_protocol": builder.target_protocol,
+                       "target_protocol_fingerprint": builder.protocol_fingerprint,
+                       "cache_entry_version": CACHE_ENTRY_VERSION,
+                       "cache_protocol_fingerprint": builder.protocol_fingerprint,
+                       "cache_manifest": builder.cache_manifest_identity,
+                       "adapter": adapter, "adapter_sha256": json_hash(adapter)}
+        payload.update({"latent_shape": list(shape), "v2_protocol": v2_protocol,
+                        "v2_metadata_sha256": json_hash(v2_protocol)})
     (root / CONFIG_NAME).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def load_flow_weights(head, directory, payload):
-    if payload and payload["config"]["optical_flow_aux_type"] != "none":
+    if payload and payload["config"]["optical_flow_aux_type"] != "none" and not payload.get("replace_flow_head"):
         if head is None:
             raise ValueError("cannot discard a saved OF head during training")
         head.load_state_dict(load_file(str(Path(directory) / WEIGHTS_NAME)), strict=True)

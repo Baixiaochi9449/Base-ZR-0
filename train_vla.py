@@ -499,6 +499,7 @@ def run_optimizer_step_window(
     if not activity["active_supervision_available"]:
         from utils.optical_flow_config import stage_loss_metadata
         from utils.optimizer_step_loss import optimizer_step_result
+        optimizer.zero_grad()
         return {**optimizer_step_result(applied=False, reason="no_supervision"), **activity,
                 **(group_guard.finish(applied=False) if group_guard else {}),
                 **({"flow_eligible_samples": counts.flow_samples, "flow_coverage": counts.flow_samples} if counts.flow_samples is not None else {}),
@@ -577,7 +578,10 @@ def run_optimizer_step_window(
                             slot_sums[key] = slot_sums.get(key, torch.zeros_like(value)) + value
                 if optical_flow_config is not None and optical_flow_config.enabled:
                     for key in ("optical_flow_loss_sum", "flow_epe_sum", "flow_motion_epe_sum", "flow_zero_epe_sum",
-                                "flow_valid_fraction_sum", "flow_motion_fraction_sum", "flow_eligible_pixels_sum", "flow_batch_samples"):
+                                "flow_valid_fraction_sum", "flow_motion_fraction_sum", "flow_eligible_pixels_sum",
+                                "flow_latent_mse_sum", "flow_batch_samples"):
+                        if key not in outputs:
+                            continue
                         value = outputs[key].detach().to(device=accelerator.device, dtype=torch.float32)
                         flow_sums[key] = flow_sums.get(key, torch.zeros_like(value)) + value
                 assert_all_finite(
@@ -614,7 +618,10 @@ def run_optimizer_step_window(
         for key, value in reduced.items():
             if key.endswith("_sum"):
                 metrics[key.removesuffix("_sum")] = value / count
-        metrics["flow_eligible_pixels"] = reduced["flow_eligible_pixels_sum"]
+        if "flow_eligible_pixels_sum" in reduced:
+            metrics["flow_eligible_pixels"] = reduced["flow_eligible_pixels_sum"]
+        if "flow_latent_mse_sum" in reduced:
+            metrics["flow_latent_mse"] = reduced["flow_latent_mse_sum"] / count
         metrics["flow_eligible_samples"] = counts.flow_samples
         metrics["flow_coverage"] = counts.flow_samples / reduced["flow_batch_samples"].clamp_min(1)
         metrics["weighted_optical_flow_loss"] = metrics["optical_flow_loss"] * optical_flow_config.optical_flow_loss_weight
@@ -1126,6 +1133,7 @@ def train(opt):
         slot_config=slot_config,
         slot_supervision_stats=slot_reader.stats if slot_reader else None,
         optical_flow_config=flow_config,
+        flow_target_device=accelerator.device,
         init_from_checkpoint=getattr(opt, "init_from_checkpoint", None),
         resume_from_checkpoint=getattr(opt, "resume_from_checkpoint", None),
         action_expert_init_seed=opt.seed,

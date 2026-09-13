@@ -78,7 +78,7 @@ def test_cached_sidecar_reuses_audited_arrays_and_checks_requested_generation(tm
 def test_cached_flow_reopen_skips_file_audit_but_keeps_sample_validation(tmp_path, monkeypatch):
     import h5py
     from test_optical_flow_aux import fixture_manifest
-    from utils.optical_flow_reader import OpticalFlowReader
+    from utils.optical_flow_reader import FlowFileIntegrityVerifier, OpticalFlowReader
     from utils.training_tokenization import DatasetIntegrityError
     record = fixture_manifest(tmp_path)
     manifest, hdf5 = tmp_path / "manifest.jsonl", tmp_path / "0.h5"
@@ -90,6 +90,8 @@ def test_cached_flow_reopen_skips_file_audit_but_keeps_sample_validation(tmp_pat
     reader.episodes[0][1]["sha256"] = record["sha256"]
     cache = PreparationAuditCache(snapshot(tmp_path, [hdf5]))
     reader.contract = {"audit_cache": cache}
+    reader._audit_cache = cache
+    reader._integrity_verifier = FlowFileIntegrityVerifier(audit_cache=cache)
     monkeypatch.setattr(reader, "_validate_structure", lambda *a: pytest.fail("full Flow file audit repeated"))
     for _ in range(2):
         assert reader.read(0, 3)["flow_supervision_available"]

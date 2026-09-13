@@ -19,6 +19,7 @@ class Stage06LiberoDataset(Stage05MixedPretrainingDataset):
     def __init__(self, *, entry, processor, loss_type, max_length, action_horizon=32,
                  max_pad_state_and_action_length=64, dataset_id=0):
         from utils.optical_flow_reader import OpticalFlowReader
+        from utils.aux_data_contract import flow_contract
 
         self.entry = dict(entry)
         self.root = Path(entry["dataset_path"]).resolve()
@@ -27,8 +28,12 @@ class Stage06LiberoDataset(Stage05MixedPretrainingDataset):
         self.camera_keys = list(entry["camera_keys"])
         if entry.get("geometric_augmentation", False):
             raise ValueError("OF forbids unsynchronized geometric augmentation")
+        flow_contract_value = (flow_contract(entry) if entry.get("aux_dataset_identity") else None)
         self.flow_reader = OpticalFlowReader(entry["optical_flow_data_root"], entry["optical_flow_manifest"],
-                                             delta_frames=entry["flow_delta_frames"])
+                                             delta_frames=entry["flow_delta_frames"],
+                                             label_source=int(entry.get("flow_label_source", 1)),
+                                             contract=flow_contract_value,
+                                             schema_contract=entry.get("flow_schema_contract"))
         if self.flow_reader.camera_key not in self.camera_keys:
             raise ValueError("supervised flow camera must be present in observations")
         info = json.loads((self.root / "meta/info.json").read_text())

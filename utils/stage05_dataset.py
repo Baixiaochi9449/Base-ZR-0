@@ -250,6 +250,7 @@ class Stage05MixedPretrainingDataset(torch.utils.data.Dataset):
             self.flow_reader = OpticalFlowReader(
                 flow_root, entry["optical_flow_manifest"],
                 delta_frames=int(entry.get("flow_delta_frames", 20)),
+                label_source=int(entry.get("flow_label_source", 1)),
                 contract=flow_contract(entry),
             )
             if self.flow_reader.camera_key not in tuple(entry["camera_keys"]):

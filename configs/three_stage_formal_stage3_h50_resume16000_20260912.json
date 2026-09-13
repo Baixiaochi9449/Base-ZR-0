@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "enabled": true,
+  "allow_stage2_init": true,
+  "runtime_commit": "3eefb602417d3bd4b20bef2b47660b404aefb565",
+  "runtime_root": "/opt/data/private/lq/ZR-0/outputs/runtime_snapshots/3eefb602417d3bd4b20bef2b47660b404aefb565",
+  "source_experiment": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260909/commit_3eefb602_flow10",
+  "init_from_checkpoint": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260909/commit_3eefb602_flow10/recovery_checkpoints/stage2_aux/step-005000-attempt-000/latest-model-optimizer-lr",
+  "action_horizon": 50,
+  "max_train_steps": 150000,
+  "outer_weights": {
+    "ar": 1.0,
+    "slot": 0.1,
+    "optical_flow": 1.0,
+    "fm": 5.0
+  },
+  "experiment": "stage3_h50_resume16000_20260912",
+  "output_root": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260911/stage3_from_stage2_step5000_h50_slot0p1_flow1/resume_from16000_20260912",
+  "wandb_project": "zr0-three-stage-formal",
+  "authorization": "User explicitly authorized resuming the original H50 Stage 3 from its complete step-16000 checkpoint with every training hyperparameter unchanged. Total target remains 150000 (134000 remaining), outer weights AR=1, Slot=0.1, Optical Flow=1, FM=5. Reuse existing audited data/statistics and pinned 3eefb602 training runtime. Restore model/optimizer/scheduler/RNG/cursor/exposure. Four GPUs, online W&B required, existing bounded automatic retry authorization retained. Stop at 150000 with no successor training.",
+  "resume_from_checkpoint": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260911/stage3_from_stage2_step5000_h50_slot0p1_flow1/recovery_checkpoints/stage3_joint/step-016000-attempt-000/latest-model-optimizer-lr",
+  "resume_step": 16000,
+  "resume_source_experiment": "/opt/data/private/lq/ZR-0/outputs/three_stage_formal_20260911/stage3_from_stage2_step5000_h50_slot0p1_flow1",
+  "resume_source_launcher_commit": "d17267551a79af3361f34f8b51f51b6b031a1ded",
+  "experiment_template": "/opt/data/private/lq/ZR-0/docs/experiments/stage3_h50_resume16000_20260912/experiment.md"
+}

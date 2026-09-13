@@ -75,7 +75,7 @@ def public_flow_contract(contract):
     return {key: value for key, value in contract.items() if key not in {"mapping", "flow_to_dataset_episode", "audit_cache"}}
 
 
-def validate_flow_file(handle, entry, contract, frames, targets):
+def validate_flow_file(handle, entry, contract, frames, targets, *, verified_sha256=None):
     expected = {"schema_version": "stage06_flow_v2", "dataset_id": contract["dataset_id"],
                 "camera_key": contract["camera"], "output_height": 224, "output_width": 224}
     for key in ("artifact_identity", "generation_identity", "label_identity", "source_fingerprint",
@@ -84,7 +84,8 @@ def validate_flow_file(handle, entry, contract, frames, targets):
     for key, value in expected.items():
         if handle.attrs.get(key) != value:
             raise ValueError(f"flow metadata mismatch: {key}")
-    if digest_file(handle.filename) != entry["sha256"]:
+    actual_sha256 = verified_sha256 if verified_sha256 is not None else digest_file(handle.filename)
+    if actual_sha256 != entry["sha256"]:
         raise ValueError("Flow file content differs from manifest sha256")
     ep = contract.get("flow_to_dataset_episode", {}).get(str(entry["merged_episode_index"]), entry["merged_episode_index"])
     path = Path(contract["dataset_root"]) / contract["mapping"][str(ep)]["source_data_uri"]

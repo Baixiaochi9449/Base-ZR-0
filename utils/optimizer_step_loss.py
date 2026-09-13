@@ -149,8 +149,8 @@ def global_supervision_counts(
     local = torch.zeros(3 if flow_enabled else 2, dtype=torch.float64, device=device)
     for batch in batches:
         if flow_enabled:
-            from utils.optical_flow_loss import prepare_flow_targets
-            local[2] += len(prepare_flow_targets(batch, optical_flow_config, device)[0])
+            from utils.optical_flow_loss import flow_supervision_indices
+            local[2] += len(flow_supervision_indices(batch, optical_flow_config, device))
         if loss_type in AR_LOSS_TYPES:
             labels = batch.get("labels")
             if not isinstance(labels, torch.Tensor):

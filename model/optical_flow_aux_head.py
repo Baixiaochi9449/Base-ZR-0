@@ -60,14 +60,71 @@ class DenseRegressionFlowHead(nn.Module):
                 "grid": self.grid.numel()}
 
 
-OPTICAL_FLOW_AUX_REGISTRY = {"none": None, "dense_regression_v1": DenseRegressionFlowHead}
+class LatentFlowDecoderLayer(nn.Module):
+    def __init__(self, hidden, heads, mlp_ratio):
+        super().__init__()
+        self.q_norm = nn.LayerNorm(hidden)
+        self.kv_norm = nn.LayerNorm(hidden)
+        self.attention = nn.MultiheadAttention(hidden, heads, batch_first=True)
+        self.mlp_norm = nn.LayerNorm(hidden)
+        self.mlp = nn.Sequential(nn.Linear(hidden, mlp_ratio * hidden), nn.GELU(),
+                                 nn.Linear(mlp_ratio * hidden, hidden))
+
+    def forward(self, spatial, memory):
+        q = self.q_norm(spatial)
+        kv = self.kv_norm(memory)
+        spatial = spatial + self.attention(q, kv, kv, need_weights=False)[0]
+        return spatial + self.mlp(self.mlp_norm(spatial))
 
 
-def build_optical_flow_head(input_dim, config):
+class WanVAELatentFlowHead(nn.Module):
+    def __init__(self, input_dim, config, latent_shape):
+        super().__init__()
+        self.config = config.validate()
+        self.latent_shape = tuple(int(v) for v in latent_shape)
+        channels, height, width = self.latent_shape
+        hidden = config.flow_v2_hidden_dim
+        self.input_norm = nn.LayerNorm(input_dim)
+        self.input_projection = nn.Linear(input_dim, hidden)
+        self.spatial_tokens = nn.Parameter(torch.empty(1, height * width, hidden))
+        nn.init.normal_(self.spatial_tokens, std=0.02)
+        self.layers = nn.ModuleList([LatentFlowDecoderLayer(hidden, config.flow_v2_num_heads,
+                                                             config.flow_v2_mlp_ratio)
+                                     for _ in range(config.flow_v2_num_layers)])
+        self.output_norm = nn.LayerNorm(hidden)
+        self.output = nn.Linear(hidden, channels)
+
+    def forward(self, query_states):
+        if query_states.ndim != 3 or query_states.shape[1] < self.config.num_flow_queries:
+            raise ValueError("flow head requires [B,Nq,H] with Nq >= num_flow_queries")
+        queries = query_states[:, -self.config.num_flow_queries:, :]
+        queries = queries.to(dtype=self.input_projection.weight.dtype)
+        memory = self.input_projection(self.input_norm(queries))
+        spatial = self.spatial_tokens.expand(queries.shape[0], -1, -1)
+        for layer in self.layers:
+            spatial = layer(spatial, memory)
+        output = self.output(self.output_norm(spatial))
+        return output.transpose(1, 2).reshape(query_states.shape[0], *self.latent_shape)
+
+    def parameter_counts(self):
+        return {"total": sum(p.numel() for p in self.parameters()),
+                "trainable": sum(p.numel() for p in self.parameters() if p.requires_grad),
+                "latent_shape": self.latent_shape}
+
+
+OPTICAL_FLOW_AUX_REGISTRY = {"none": None, "dense_regression_v1": DenseRegressionFlowHead,
+                             "wan_vae_latent_v2": WanVAELatentFlowHead}
+
+
+def build_optical_flow_head(input_dim, config, latent_shape=None):
     config.validate()
     factory = OPTICAL_FLOW_AUX_REGISTRY[config.optical_flow_aux_type]
     if factory is None:
         return None
+    if config.optical_flow_aux_type == "wan_vae_latent_v2" and latent_shape is None:
+        raise ValueError("V2 head construction requires the probed latent shape")
     with torch.random.fork_rng(devices=[]):
         torch.random.default_generator.manual_seed(config.flow_init_seed)
+        if config.optical_flow_aux_type == "wan_vae_latent_v2":
+            return factory(input_dim, config, latent_shape)
         return factory(input_dim, config)
